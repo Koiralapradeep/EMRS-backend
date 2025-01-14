@@ -1,7 +1,9 @@
 import express from "express";
 import multer from "multer";
 import path from "path";
+import bcrypt from "bcrypt";
 import Employee from "../models/Employee.js";
+import User from "../models/User.js";
 
 const router = express.Router();
 
@@ -33,6 +35,7 @@ router.post("/add", upload.single("image"), async (req, res) => {
       designation,
       department,
       role,
+      password,
     } = req.body;
 
     // Validate required fields
@@ -45,7 +48,8 @@ router.post("/add", upload.single("image"), async (req, res) => {
       !maritalStatus ||
       !designation ||
       !department ||
-      !role
+      !role ||
+      !password
     ) {
       return res.status(400).json({
         success: false,
@@ -53,8 +57,23 @@ router.post("/add", upload.single("image"), async (req, res) => {
       });
     }
 
+    // Hash the password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create a new user
+    const newUser = new User({
+      name: fullName, // Provide the required 'name' field for the User
+      email,
+      role,
+      password: hashedPassword, // Store the hashed password
+    });
+
+    // Save the user to the database
+    const savedUser = await newUser.save();
+
+    // Create a new employee
     const newEmployee = new Employee({
-      userId: "63e8f0b9f6e2eec84bfc47d1", // Placeholder ObjectId
+      userId: savedUser._id, // Link the User's ObjectId to the Employee
       fullName,
       email,
       employeeID,
