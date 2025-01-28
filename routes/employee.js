@@ -4,6 +4,8 @@ import path from "path";
 import bcrypt from "bcrypt";
 import Employee from "../models/Employee.js";
 import User from "../models/User.js";
+import mongoose from "mongoose";
+
 
 const router = express.Router();
 
@@ -117,6 +119,7 @@ router.get("/:id", async (req, res) => {
     const employee = await Employee.findById(req.params.id).populate("department", "departmentName");
     if (!employee) {
       return res.status(404).json({ success: false, error: "Employee not found." });
+      
     }
     res.status(200).json({ success: true, employee });
   } catch (error) {
@@ -187,5 +190,41 @@ router.delete("/:id", async (req, res) => {
     res.status(500).json({ success: false, error: "Failed to delete employee." });
   }
 });
+
+router.get("/user/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // Debugging log
+    console.log("Received userId:", userId);
+
+    // Validate ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      console.error("Invalid userId format");
+      return res.status(400).json({ success: false, error: "Invalid user ID format." });
+    }
+
+    // Use `new` when creating an ObjectId
+    const employee = await Employee.findOne({ userId: new mongoose.Types.ObjectId(userId) }).populate(
+      "department",
+      "departmentName"
+    );
+
+    // Debugging log
+    console.log("Fetched employee:", employee);
+
+    if (!employee) {
+      console.error("Employee not found");
+      return res.status(404).json({ success: false, error: "Employee not found." });
+    }
+
+    res.status(200).json({ success: true, employee });
+  } catch (error) {
+    console.error("Error in fetching employee:", error.message);
+    res.status(500).json({ success: false, error: "Failed to fetch employee." });
+  }
+});
+
+
 
 export default router;
