@@ -7,8 +7,7 @@ import mongoose from "mongoose";
 const router = express.Router();
 
 /**
- * @route GET /api/leavegit stash list
-
+ * @route GET /api/leave
  * @desc Fetch all leave requests or specific user's leave requests
  */
 router.get("/", async (req, res) => {
