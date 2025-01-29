@@ -95,4 +95,58 @@ router.post("/add", async (req, res) => {
   }
 });
 
+// Update leave status by leave ID
+router.put("/:id/status", async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  try {
+    // Validate inputs
+    if (!id || !status) {
+      return res.status(400).json({ success: false, message: "Missing leave ID or status" });
+    }
+
+    // Find the leave by ID
+    const leave = await Leave.findById(id);
+    if (!leave) {
+      return res.status(404).json({ success: false, message: "Leave not found" });
+    }
+
+    // Update the status
+    leave.status = status;
+    await leave.save();
+
+    res.status(200).json({ success: true, message: `Leave status updated to ${status}` });
+  } catch (error) {
+    console.error("Error updating leave status:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+router.get("/", async (req, res) => {
+  try {
+    const { userId } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "No user ID provided." });
+    }
+
+    // Find leave requests for the specific user
+    const leaves = await Leave.find({ userId })
+      .populate({ path: "userId", select: "name" })
+      .lean();
+
+    if (leaves.length === 0) {
+      return res.status(404).json({ success: false, error: "No leave requests found for this employee." });
+    }
+
+    res.status(200).json({ success: true, leaves });
+  } catch (error) {
+    console.error("Error fetching leave requests:", error.message);
+    res.status(500).json({ success: false, error: "Internal Server Error." });
+  }
+});
+
+
+
 export default router;

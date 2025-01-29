@@ -4,7 +4,9 @@ import dotenv from "dotenv";
 import connectDB from "./db/DB.js";
 import employee from './routes/employee.js';
 import department from "./routes/department.js";
-import authRoutes from "./routes/auth.js"; // Import the auth.js routes
+import authRoutes from "./routes/auth.js";
+import leave from './routes/leave.js';
+import setting from './routes/setting.js'
 
 dotenv.config();
 connectDB();
@@ -20,6 +22,8 @@ app.use("/public/uploads", express.static("public/uploads"));
 app.use("/api/auth", authRoutes);
 app.use("/api/employee", employee);
 app.use("/api/departments", department);
+app.use("/api/setting", setting);
+app.use("/api/leave", leave);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
