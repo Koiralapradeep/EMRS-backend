@@ -1,12 +1,9 @@
-import express from 'express'
-import authMiddleware from '../middleware/authMiddleware.js';
-import { changePassword } from '../controller/settingController.js';
+import express from "express";
+import { changePassword } from "../controller/settingController.js";
+import authMiddleware from "../middleware/authMiddleware.js";
 
+const router = express.Router();
 
+router.put("/change-password", authMiddleware, changePassword);
 
-const router= express.Router()
-
-router.put('/change-password', authMiddleware, changePassword)
-
-
-export default router
+export default router;
