@@ -1,17 +1,5 @@
 import express from "express";
 import Feedback from "../models/Feedback.js";
-<<<<<<< HEAD
-import User from "../models/User.js"; 
-import Employee from "../models/Employee.js"; 
-
-
-const router = express.Router();
-
-// POST: Add Feedback
-router.post("/", async (req, res) => {
-  try {
-    const { userId, accomplishments, challenges, suggestions } = req.body;
-=======
 import Employee from "../models/Employee.js";
 
 const router = express.Router();
@@ -24,16 +12,11 @@ router.post("/", async (req, res) => {
   try {
     // Destructure with new keys from the request body
     const { userId, accomplishments, challenges, suggestions, makePrivate, saveToDashboard } = req.body;
->>>>>>> development
 
     if (!userId || !accomplishments || !challenges || !suggestions) {
       return res.status(400).json({ success: false, error: "All fields are required." });
     }
 
-<<<<<<< HEAD
-    const feedback = new Feedback({ userId, accomplishments, challenges, suggestions });
-    await feedback.save();
-=======
     const feedback = new Feedback({
       userId,
       accomplishments,
@@ -45,7 +28,6 @@ router.post("/", async (req, res) => {
 
     await feedback.save();
     console.log("🟢 New Feedback Saved:", feedback);
->>>>>>> development
 
     return res.status(201).json({
       success: true,
@@ -53,22 +35,11 @@ router.post("/", async (req, res) => {
       feedback,
     });
   } catch (error) {
-<<<<<<< HEAD
-    console.error("Error adding feedback:", error);
-=======
     console.error("❌ Error adding feedback:", error);
->>>>>>> development
     return res.status(500).json({ success: false, error: "Internal Server Error." });
   }
 });
 
-<<<<<<< HEAD
-// GET: Fetch Feedbacks for a Specific User
-router.get("/", async (req, res) => {
-  try {
-    const { userId } = req.query;
-
-=======
 /**
  * @route GET /api/feedback
  * @desc Fetch only "saved" feedbacks for Employee Dashboard (saveToDashboard: true)
@@ -76,33 +47,10 @@ router.get("/", async (req, res) => {
 router.get("/", async (req, res) => {
   try {
     const { userId } = req.query;
->>>>>>> development
     if (!userId) {
       return res.status(400).json({ success: false, error: "User ID is required." });
     }
 
-<<<<<<< HEAD
-    const feedbacks = await Feedback.find({ userId }).sort({ createdAt: -1 });
-
-    return res.status(200).json({ success: true, feedbacks });
-  } catch (error) {
-    console.error("Error fetching feedbacks:", error);
-    return res.status(500).json({ success: false, error: "Internal Server Error." });
-  }
-});
-router.get("/manager", async (req, res) => {
-  try {
-    const feedbacks = await Feedback.find()
-      .populate({
-        path: "userId",
-        select: "name email",
-      })
-      .sort({ createdAt: -1 });
-
-    const populatedFeedbacks = await Promise.all(
-      feedbacks.map(async (feedback) => {
-        const employee = await Employee.findOne({ userId: feedback.userId._id })
-=======
     // Only return feedback that should be permanently saved on the Employee Dashboard
     const feedbacks = await Feedback.find({ userId, saveToDashboard: true }).sort({ createdAt: -1 });
     console.log(`🟢 Fetching Feedback for User: ${userId} - Found: ${feedbacks.length}`);
@@ -134,29 +82,17 @@ router.get("/manager", async (req, res) => {
       feedbacks.map(async (feedback) => {
         const employeeId = feedback.userId?._id || feedback.userId;
         const employee = await Employee.findOne({ userId: employeeId })
->>>>>>> development
           .populate("department", "departmentName")
           .lean();
 
         return {
           ...feedback.toObject(),
-<<<<<<< HEAD
-          employeeID: employee?.employeeID || "N/A",
-          department: employee?.department?.departmentName || "N/A",
-=======
           employeeID: feedback.makePrivate ? "Unknown" : (employee?.employeeID || "N/A"),
           department: feedback.makePrivate ? "Unknown" : (employee?.department?.departmentName || "Not Assigned"),
->>>>>>> development
         };
       })
     );
 
-<<<<<<< HEAD
-    res.status(200).json({ success: true, feedbacks: populatedFeedbacks });
-  } catch (error) {
-    console.error("Error fetching feedbacks:", error.message, error.stack);
-    res.status(500).json({ success: false, error: "Internal Server Error." });
-=======
     console.log(`🟢 Final API Response: ${populatedFeedbacks.length} Feedbacks`);
     return res.status(200).json({ success: true, feedbacks: populatedFeedbacks });
   } catch (error) {
@@ -186,17 +122,8 @@ router.delete("/:id", async (req, res) => {
   } catch (error) {
     console.error("❌ Error deleting feedback:", error);
     return res.status(500).json({ success: false, error: "Internal Server Error." });
->>>>>>> development
   }
 });
 
 
-<<<<<<< HEAD
- 
-  
-  
-  
-
-=======
->>>>>>> development
 export default router;

@@ -7,15 +7,13 @@ const leaveSchema = new mongoose.Schema(
     fromDate: { type: Date, required: true },
     toDate: { type: Date, required: true },
     description: { type: String },
-<<<<<<< HEAD
+
     status: { type: String, default: "Pending" },
     appliedDate: { type: Date, default: Date.now },
-=======
     status: { 
       type: String, 
       enum:["Pending","Approved","Rejected"],
       default: "Pending" },
->>>>>>> development
   },
   { timestamps: true }
 );
