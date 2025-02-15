@@ -6,6 +6,7 @@ const feedbackSchema = new mongoose.Schema(
     accomplishments: { type: String, required: true },
     challenges: { type: String, required: true },
     suggestions: { type: String, required: true },
+
     makePrivate: { type: Boolean, default: false },     // Combined from features/Feedback
     saveToDashboard: { type: Boolean, default: false }, // Combined from features/Feedback
 
@@ -13,7 +14,6 @@ const feedbackSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-
 const Feedback = mongoose.model("Feedback", feedbackSchema);
-export default mongoose.model("Feedback", feedbackSchema);
+export default Feedback;
 
