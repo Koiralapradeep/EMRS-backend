@@ -8,6 +8,11 @@ const employeeSchema = new mongoose.Schema(
       ref: 'User',
       required: true,
     },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Company', //  Ensure employee belongs to a company
+      required: true,
+    },
     employeeID: {
       type: String,
       required: true,
@@ -45,11 +50,6 @@ const employeeSchema = new mongoose.Schema(
     department: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Department',
-      required: true,
-    },
-    role: {
-      type: String,
-      enum: ['Manager', 'Employee'],
       required: true,
     },
     image: {

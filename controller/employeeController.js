@@ -16,6 +16,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
+//  Add Employee (Ensure companyId is assigned)
 const addEmployee = async (req, res) => {
   try {
     const {
@@ -42,6 +43,11 @@ const addEmployee = async (req, res) => {
       return res.status(400).json({ success: false, error: 'User already registered.' });
     }
 
+    //  Ensure the manager (req.user) has a company assigned
+    if (!req.user.companyId) {
+      return res.status(403).json({ success: false, error: "Manager does not belong to a company." });
+    }
+
     // Hash the password
     const hashPassword = await bcrypt.hash(password, 10);
 
@@ -51,6 +57,7 @@ const addEmployee = async (req, res) => {
       email,
       password: hashPassword,
       role,
+      companyId: req.user.companyId, //  Assign companyId from manager
     });
 
     const savedUser = await newUser.save();
@@ -66,6 +73,7 @@ const addEmployee = async (req, res) => {
       maritalStatus,
       designation,
       department,
+      companyId: req.user.companyId, //  Assign companyId from manager
       image: req.file ? req.file.filename : null, // Store image if uploaded
     });
 
@@ -78,5 +86,14 @@ const addEmployee = async (req, res) => {
   }
 };
 
+//  Get Employees (Company-Specific)
+const getEmployees = async (req, res) => {
+  try {
+    const employees = await Employee.find({ companyId: req.user.companyId });
+    res.status(200).json({ success: true, employees });
+  } catch (error) {
+    res.status(500).json({ success: false, error: "Error fetching employees." });
+  }
+};
 
-export { addEmployee, upload };
+export { addEmployee, getEmployees, upload };

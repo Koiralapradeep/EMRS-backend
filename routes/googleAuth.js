@@ -9,7 +9,7 @@ dotenv.config();
 
 const router = express.Router();
 
-// ✅ Configure Google OAuth Strategy
+// Configure Google OAuth Strategy
 passport.use(
   new GoogleStrategy(
     {
@@ -22,17 +22,26 @@ passport.use(
         const email = profile.emails[0].value;
         let user = await User.findOne({ email });
 
+        // Only allow existing users (or add auto-creation logic if needed)
         if (!user) {
-          return done(null, false); // ❌ User not found
+          console.warn(`User with email ${email} not found. Login denied.`);
+          return done(null, false);
         }
 
-        // ✅ Generate JWT Token
+        // Generate JWT token with role, companyId, and companyName
         const token = jwt.sign(
-          { _id: user._id, role: user.role },
+          {
+            id: user._id,
+            email: user.email,
+            role: user.role,
+            companyId: user.companyId,
+            companyName: user.companyName, // Make sure this field exists in your DB
+          },
           process.env.JWT_KEY,
           { expiresIn: "10d" }
         );
 
+        console.log("User authenticated via OAuth2:", user.email);
         return done(null, { user, token });
       } catch (error) {
         return done(error, null);
@@ -49,35 +58,28 @@ passport.deserializeUser((user, done) => {
   done(null, user);
 });
 
-// ✅ Google OAuth Login Route
-router.get(
-  "/google",
-  passport.authenticate("google", { scope: ["profile", "email"] })
-);
+// Google OAuth Login Route
+router.get("/google", passport.authenticate("google", { scope: ["profile", "email"] }));
 
-// ✅ Google OAuth Callback
+// Google OAuth Callback Route
 router.get(
   "/google/callback",
-  passport.authenticate("google", { failureRedirect: "/login" }),
+  passport.authenticate("google", { failureRedirect: "http://localhost:5173/login" }),
   async (req, res) => {
     if (!req.user) {
-      return res.redirect("http://localhost:5173/not-registered"); // Redirect to frontend
+      return res.redirect("http://localhost:5173/login?error=user-not-found");
     }
 
     const token = req.user.token;
-
-    // ✅ Redirect based on user role to frontend
-    const redirectURL =
-      req.user.user.role === "Manager"
-        ? `http://localhost:5173/manager-dashboard?token=${token}`
-        : `http://localhost:5173/employee-dashboard?token=${token}`;
+    console.log("Google OAuth2 - Token generated:", token);
 
     res.cookie("jwt", token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
     });
 
-    res.redirect(redirectURL);
+    // Redirect to frontend with token as query parameter
+    res.redirect(`http://localhost:5173/login?token=${token}`);
   }
 );
 

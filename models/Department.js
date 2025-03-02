@@ -17,6 +17,11 @@ const departmentSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company", // Ensure department belongs to a company
+      required: true,
+    },
   },
   { timestamps: true }
 );

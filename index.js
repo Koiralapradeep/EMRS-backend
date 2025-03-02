@@ -3,6 +3,7 @@ import session from "express-session";
 import passport from "passport";
 import cors from "cors";
 import dotenv from "dotenv";
+import cookieParser from "cookie-parser";
 import connectDB from "./db/DB.js";
 import authRoutes from "./routes/auth.js";
 import googleAuth from "./routes/googleAuth.js";
@@ -11,17 +12,22 @@ import departments from "./routes/department.js";
 import leave from "./routes/leave.js";
 import setting from "./routes/setting.js";
 import feedback from "./routes/feedback.js";
+import company from "./routes/company.js";
+import manager from "./routes/manager.js";
 
 dotenv.config();
 const app = express();
 
 // Enable CORS to allow frontend requests
-app.use(cors({
-  origin: "http://localhost:5173", 
-  credentials: true
-}));
+app.use(
+  cors({
+    origin: "http://localhost:5173",
+    credentials: true,
+  })
+);
 
 app.use(express.json());
+app.use(cookieParser()); // Added middleware for parsing cookies
 
 // Serve the uploaded images from /public/uploads
 app.use("/public/uploads", express.static("public/uploads"));
@@ -33,7 +39,7 @@ app.use(
     resave: false,
     saveUninitialized: false,
     cookie: {
-      secure: process.env.NODE_ENV === "production", // HTTPS only in production
+      secure: process.env.NODE_ENV === "production", 
       httpOnly: true,
       maxAge: 24 * 60 * 60 * 1000, // 1 day
     },
@@ -52,7 +58,8 @@ app.use("/api/departments", departments);
 app.use("/api/leave", leave);
 app.use("/api/setting", setting);
 app.use("/api/feedback", feedback);
-
+app.use("/api/company", company);
+app.use("/api/manager", manager);
 
 //  Start Server
 const PORT = process.env.PORT || 3000;

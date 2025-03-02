@@ -1,24 +1,29 @@
 import express from "express";
 import Feedback from "../models/Feedback.js";
 import Employee from "../models/Employee.js";
-
+import {verifyUser} from "../middleware/authMiddleware.js";
+import User from '../models/User.js';
 const router = express.Router();
 
 /**
  * @route POST /api/feedback
- * @desc Add Feedback and store makePrivate & saveToDashboard flags
+ * @desc Add Feedback - Employees can only add feedback for their own company
  */
-router.post("/", async (req, res) => {
+router.post("/", verifyUser, async (req, res) => {
   try {
-    // Destructure with new keys from the request body
-    const { userId, accomplishments, challenges, suggestions, makePrivate, saveToDashboard } = req.body;
+    const { accomplishments, challenges, suggestions, makePrivate, saveToDashboard } = req.body;
 
-    if (!userId || !accomplishments || !challenges || !suggestions) {
-      return res.status(400).json({ success: false, error: "All fields are required." });
+    if (!req.user.companyId) {
+      return res.status(403).json({ success: false, error: "Unauthorized: No company assigned." });
     }
 
+    // Get employee details (assuming department is stored in `User` model)
+    const employee = await User.findById(req.user._id).select("department");
+
     const feedback = new Feedback({
-      userId,
+      userId: req.user._id,
+      companyId: req.user.companyId, 
+      department: employee.department || "Unknown", 
       accomplishments,
       challenges,
       suggestions,
@@ -27,37 +32,35 @@ router.post("/", async (req, res) => {
     });
 
     await feedback.save();
-    console.log("🟢 New Feedback Saved:", feedback);
+    console.log(" New Feedback Saved:", feedback);
 
-    return res.status(201).json({
-      success: true,
-      message: "Feedback added successfully.",
-      feedback,
-    });
+    return res.status(201).json({ success: true, message: "Feedback added successfully.", feedback });
   } catch (error) {
-    console.error("❌ Error adding feedback:", error);
+    console.error(" Error adding feedback:", error);
     return res.status(500).json({ success: false, error: "Internal Server Error." });
   }
 });
 
+
+
 /**
  * @route GET /api/feedback
- * @desc Fetch only "saved" feedbacks for Employee Dashboard (saveToDashboard: true)
+ * @desc Fetch only "saved" feedbacks for Employee Dashboard (saveToDashboard: true) - Employees can only see their own feedback
  */
-router.get("/", async (req, res) => {
+router.get("/", verifyUser, async (req, res) => {
   try {
-    const { userId } = req.query;
-    if (!userId) {
-      return res.status(400).json({ success: false, error: "User ID is required." });
+    if (!req.user || req.user.role !== "Employee") {
+      console.log(">>> Unauthorized access to feedbacks:", req.user);
+      return res.status(403).json({ success: false, error: "Access denied." });
     }
 
-    // Only return feedback that should be permanently saved on the Employee Dashboard
-    const feedbacks = await Feedback.find({ userId, saveToDashboard: true }).sort({ createdAt: -1 });
-    console.log(`🟢 Fetching Feedback for User: ${userId} - Found: ${feedbacks.length}`);
+    // Fetch only feedbacks from the logged-in employee
+    const feedbacks = await Feedback.find({ userId: req.user._id, saveToDashboard: true }).sort({ createdAt: -1 });
 
+    console.log(`>>> Fetching Feedback for Employee: ${req.user._id} - Found: ${feedbacks.length}`);
     return res.status(200).json({ success: true, feedbacks });
   } catch (error) {
-    console.error("❌ Error fetching feedbacks:", error);
+    console.error(" Error fetching feedbacks:", error);
     return res.status(500).json({ success: false, error: "Internal Server Error." });
   }
 });
@@ -66,53 +69,74 @@ router.get("/", async (req, res) => {
  * @route GET /api/feedback/manager
  * @desc Fetch all feedbacks for the Manager Dashboard with employee info masked if makePrivate is true
  */
-router.get("/manager", async (req, res) => {
+router.get("/manager", verifyUser, async (req, res) => {
   try {
-    console.log("🟢 Fetching Feedback for Manager...");
+    console.log(`Fetching Feedback for Manager (Company ID: ${req.user.companyId})`);
 
-    // Populate the userId field so we have name/email information
-    const feedbacks = await Feedback.find()
-      .populate({ path: "userId", select: "name email" })
+    const feedbacks = await Feedback.find({ companyId: req.user.companyId })
+      .populate({ path: "userId", select: "name email department" })
       .sort({ createdAt: -1 });
 
-    console.log("🟢 All Feedbacks Retrieved:", feedbacks.length);
+    console.log("Found Feedback:", feedbacks.length);
 
-    // For each feedback, fetch the associated employee and mask info if makePrivate is true
     const populatedFeedbacks = await Promise.all(
       feedbacks.map(async (feedback) => {
-        const employeeId = feedback.userId?._id || feedback.userId;
-        const employee = await Employee.findOne({ userId: employeeId })
-          .populate("department", "departmentName")
+        const employee = await Employee.findOne({ userId: feedback.userId._id })
+          .populate({ path: "department", select: "departmentName" })
           .lean();
-
         return {
-          ...feedback.toObject(),
-          employeeID: feedback.makePrivate ? "Unknown" : (employee?.employeeID || "N/A"),
-          department: feedback.makePrivate ? "Unknown" : (employee?.department?.departmentName || "Not Assigned"),
+          // Convert feedback to a plain object if it's a Mongoose document
+          ...feedback.toObject ? feedback.toObject() : feedback,
+          employeeID: employee?.employeeID || "N/A",
+          department: employee?.department?.departmentName || "N/A",
         };
       })
     );
 
-    console.log(`🟢 Final API Response: ${populatedFeedbacks.length} Feedbacks`);
     return res.status(200).json({ success: true, feedbacks: populatedFeedbacks });
   } catch (error) {
-    console.error("❌ Error fetching feedbacks:", error);
+    console.error("Error fetching manager feedback:", error);
     return res.status(500).json({ success: false, error: "Internal Server Error." });
   }
 });
 
 /**
  * @route DELETE /api/feedback/:id
- * @desc Delete a feedback by ID
+ * @desc
  */
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", verifyUser, async (req, res) => {
   try {
     const { id } = req.params;
-    const feedback = await Feedback.findByIdAndDelete(id);
 
+    //  Find the feedback by its _id
+    const feedback = await Feedback.findById(id);
     if (!feedback) {
-      return res.status(404).json({ success: false, message: "Feedback not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Feedback not found.",
+      });
     }
+
+    // 
+    if (!feedback.companyId || !req.user.companyId) {
+      console.log(">>> FAIL: Missing companyId in either feedback or user.");
+      return res.status(500).json({
+        success: false,
+        error: "companyId missing. Check DB data and user token.",
+      });
+    }
+
+    if (feedback.companyId.toString() !== req.user.companyId) {
+      console.log(">>> FAIL: Unauthorized delete attempt");
+      return res.status(403).json({
+        success: false,
+        error: "Not authorized to delete this feedback.",
+      });
+    }
+
+    // If it matches, delete the feedback
+    await feedback.deleteOne();
+    console.log(">>> SUCCESS: Feedback deleted");
 
     return res.status(200).json({
       success: true,
@@ -120,7 +144,7 @@ router.delete("/:id", async (req, res) => {
       deletedId: id,
     });
   } catch (error) {
-    console.error("❌ Error deleting feedback:", error);
+    console.error("Error deleting feedback:", error);
     return res.status(500).json({ success: false, error: "Internal Server Error." });
   }
 });
