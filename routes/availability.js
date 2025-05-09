@@ -1002,6 +1002,17 @@ router.get('/analytics/:companyId', verifyUser, authorizeRoles(['Manager']), asy
       return res.status(400).json({ message: 'Invalid departmentId.' });
     }
 
+    // Add validation for weekStartDate to prevent fetching before the current week
+    if (weekStartDate) {
+      const today = dayjs().utc();
+      const currentWeekStart = today.subtract(today.day(), 'day'); // Sunday of the current week (e.g., May 4)
+      const requestedWeekStart = dayjs.utc(weekStartDate, 'YYYY-MM-DD').startOf('day');
+      if (requestedWeekStart.isBefore(currentWeekStart, 'day')) {
+        console.log('Validation failed: Cannot fetch analytics before the current week');
+        return res.status(400).json({ message: 'Cannot fetch analytics for weeks before the current week.' });
+      }
+    }
+
     const query = { companyId };
     if (weekStartDate) {
       const startDate = dayjs.utc(weekStartDate, 'YYYY-MM-DD').startOf('day');
@@ -1880,6 +1891,14 @@ router.post('/auto-schedule/:companyId', verifyUser, authorizeRoles(['Manager'])
       return res.status(400).json({ message: 'Date range must be exactly one week (from Sunday to Saturday).' });
     }
 
+    // Add validation for startDate to prevent scheduling before the current week
+    const today = dayjs().utc();
+    const currentWeekStart = today.subtract(today.day(), 'day'); // Sunday of the current week (e.g., May 4)
+    if (start.isBefore(currentWeekStart, 'day')) {
+      console.log('Validation failed: Cannot schedule before the current week');
+      return res.status(400).json({ message: 'Cannot generate a schedule for weeks before the current week.' });
+    }
+
     if (!departmentId || !mongoose.Types.ObjectId.isValid(departmentId)) {
       console.log('Validation failed: Invalid departmentId');
       return res.status(400).json({ message: 'Invalid departmentId. Must be a valid ObjectId.' });
@@ -1951,8 +1970,9 @@ router.post('/auto-schedule/:companyId', verifyUser, authorizeRoles(['Manager'])
         if (employeeDetails && employeeDetails.department) {
           avail.employeeId.departmentId = employeeDetails.department;
         } else {
-          console.warn(`No employee details found in employees collection for user ${avail.employeeId._id}. Setting departmentId to null.`);
-          avail.employeeId.departmentId = null;
+          console.warn(`No employee details found in employees collection for user ${avail.employeeId._id}. Attempting to fetch from User collection.`);
+          const user = await User.findById(avail.employeeId._id).select('departmentId').lean();
+          avail.employeeId.departmentId = user?.departmentId || null;
         }
       } else {
         console.warn(`Skipping department fetch for availability ${avail._id}: employeeId is invalid`);
@@ -2021,6 +2041,9 @@ router.post('/auto-schedule/:companyId', verifyUser, authorizeRoles(['Manager'])
     }, {});
     console.log('Days of week indices:', daysOfWeekIndices);
 
+    // Track employees assigned per day to prevent multiple shifts on the same day
+    const employeesAssignedPerDay = {};
+
     for (const requirement of shiftRequirements) {
       const deptId = requirement.departmentId.toString();
       fairnessMetricsByDept[deptId] = { totalHours: 0, shiftsAssigned: 0, employeesAssigned: new Set() };
@@ -2031,6 +2054,11 @@ router.post('/auto-schedule/:companyId', verifyUser, authorizeRoles(['Manager'])
         if (!slots || slots.length === 0) {
           console.log(`No slots defined for ${day}`);
           continue;
+        }
+
+        // Initialize tracking for this day
+        if (!employeesAssignedPerDay[day]) {
+          employeesAssignedPerDay[day] = new Set();
         }
 
         // Preprocess shift requirement slots
@@ -2058,8 +2086,25 @@ router.post('/auto-schedule/:companyId', verifyUser, authorizeRoles(['Manager'])
 
           const durationMinutes = adjustedSlotEndMinutes - slotStartMinutes;
           const duration = durationMinutes / 60;
+
+          // Normalize shiftType based on time range
+          let normalizedShiftType = slot.shiftType ? slot.shiftType.toLowerCase() : null;
+          const startHour = parseInt(slot.startTime.split(':')[0]);
+          const inferredShiftType = startHour >= 18 || startHour < 6 ? 'night' : 'day';
+          if (!normalizedShiftType) {
+            normalizedShiftType = inferredShiftType;
+            console.log(`Inferred shiftType for slot ${slot.startTime}-${slot.endTime} on ${day}: ${normalizedShiftType}`);
+          } else if (normalizedShiftType !== inferredShiftType) {
+            console.warn(`Shift type mismatch with time range for slot ${slot.startTime}-${slot.endTime} on ${day}:`, {
+              databaseShiftType: slot.shiftType,
+              inferredShiftType,
+            });
+            normalizedShiftType = inferredShiftType; // Prioritize inferred shift type based on time
+          }
+
           return {
             ...slot,
+            shiftType: normalizedShiftType,
             slotStartDayIdx,
             slotEndDayIdx,
             slotStartMinutes,
@@ -2113,6 +2158,12 @@ router.post('/auto-schedule/:companyId', verifyUser, authorizeRoles(['Manager'])
               continue;
             }
 
+            // Check if the employee has already been assigned a shift on this day
+            if (employeesAssignedPerDay[day].has(employeeIdStr)) {
+              console.log(`Employee ${avail.employeeId.email} already assigned a shift on ${day}. Skipping for this slot.`);
+              continue;
+            }
+
             const dayAvailability = avail.days[day];
             if (!dayAvailability || !dayAvailability.available) {
               console.log(`Employee ${avail.employeeId.email} is not available on ${day}. Raw days data:`, JSON.stringify(avail.days, null, 2));
@@ -2125,11 +2176,26 @@ router.post('/auto-schedule/:companyId', verifyUser, authorizeRoles(['Manager'])
                 return false;
               }
 
-              // Match shiftType first
-              if (s.shiftType !== slot.shiftType) {
+              // Normalize shiftType for availability
+              let normalizedAvailableShiftType = s.shiftType ? s.shiftType.toLowerCase() : null;
+              const startHour = parseInt(s.startTime.split(':')[0]);
+              const inferredShiftType = startHour >= 18 || startHour < 6 ? 'night' : 'day';
+              if (!normalizedAvailableShiftType) {
+                normalizedAvailableShiftType = inferredShiftType;
+                console.log(`Inferred shiftType for availability slot ${s.startTime}-${s.endTime} on ${day} for employee ${avail.employeeId.email}: ${normalizedAvailableShiftType}`);
+              } else if (normalizedAvailableShiftType !== inferredShiftType) {
+                console.warn(`Shift type mismatch with time range for availability slot ${s.startTime}-${s.endTime} on ${day} for employee ${avail.employeeId.email}:`, {
+                  databaseShiftType: s.shiftType,
+                  inferredShiftType,
+                });
+                normalizedAvailableShiftType = inferredShiftType; // Prioritize inferred shift type based on time
+              }
+
+              // Match shiftType
+              if (normalizedAvailableShiftType !== slot.shiftType) {
                 console.log(`Shift type mismatch for ${avail.employeeId.email} on ${day}:`, {
                   requiredShiftType: slot.shiftType,
-                  availableShiftType: s.shiftType,
+                  availableShiftType: normalizedAvailableShiftType,
                 });
                 return false;
               }
@@ -2155,23 +2221,36 @@ router.post('/auto-schedule/:companyId', verifyUser, authorizeRoles(['Manager'])
                 }
               }
 
+              // Check if the availability slot covers the required slot
               const slotMatchesStartDay = sStartDayIdx === slotStartDayIdx;
-              const slotMatchesEndDay = sEndDayIdx === slotEndDayIdx;
-              const overlaps =
-                slotMatchesStartDay &&
-                slotMatchesEndDay &&
-                sStartMinutes <= slotStartMinutes &&
-                adjustedSEndMinutes >= adjustedSlotEndMinutes;
+              if (!slotMatchesStartDay) {
+                console.log(`Start day mismatch for ${avail.employeeId.email} on ${day}:`, {
+                  requiredStartDay: slot.startDay,
+                  availableStartDay: s.startDay,
+                });
+                return false;
+              }
+
+              // Simplified overlap check: ensure the availability covers the required slot
+              const coversStart = sStartMinutes <= slotStartMinutes;
+              let coversEnd = false;
+              if (sEndDayIdx > sStartDayIdx || (sEndDayIdx === sStartDayIdx && adjustedSEndMinutes >= adjustedSlotEndMinutes)) {
+                // Availability either spans days or ends late enough on the same day
+                coversEnd = true;
+              }
+
+              const overlaps = coversStart && coversEnd;
 
               console.log(`Checking overlap for ${avail.employeeId.email} on ${day}:`, {
                 required: `${slot.startTime}-${slot.endTime} (Day ${slotStartDayIdx} to ${slotEndDayIdx}, Type: ${slot.shiftType})`,
-                available: `${s.startTime}-${s.endTime} (Day ${sStartDayIdx} to ${sEndDayIdx}, Type: ${s.shiftType})`,
+                available: `${s.startTime}-${s.endTime} (Day ${sStartDayIdx} to ${sEndDayIdx}, Type: ${normalizedAvailableShiftType})`,
                 slotStartMinutes,
                 adjustedSlotEndMinutes,
                 sStartMinutes,
                 adjustedSEndMinutes,
                 slotMatchesStartDay,
-                slotMatchesEndDay,
+                coversStart,
+                coversEnd,
                 overlaps,
                 rawSlot: s,
               });
@@ -2204,12 +2283,29 @@ router.post('/auto-schedule/:companyId', verifyUser, authorizeRoles(['Manager'])
               }
             }
 
+            // Calculate the actual overlapping time for the shift
             const actualStartMinutes = Math.max(sStartMinutes, slotStartMinutes);
-            const actualEndMinutes = Math.min(adjustedSEndMinutes, adjustedSlotEndMinutes);
+            const actualEndMinutes = adjustedSlotEndMinutes; // Since the overlap check passed, use the required slot's end time
+
+            if (actualEndMinutes <= actualStartMinutes) {
+              actualEndMinutes += 24 * 60;
+            }
+
             const actualDurationMinutes = actualEndMinutes - actualStartMinutes;
             const actualDurationHours = actualDurationMinutes / 60;
 
-            const coveragePercentage = (actualDurationHours / slotDuration) * 100;
+            const requiredDurationMinutes = adjustedSlotEndMinutes - slotStartMinutes;
+            const requiredDurationHours = requiredDurationMinutes / 60;
+            const coveragePercentage = (actualDurationHours / requiredDurationHours) * 100;
+
+            console.log(`Coverage calculation for ${avail.employeeId.email} on ${day}:`, {
+              actualStartMinutes,
+              actualEndMinutes,
+              actualDurationHours,
+              requiredDurationHours,
+              coveragePercentage,
+            });
+
             if (coveragePercentage < 100) {
               console.log(`Employee ${avail.employeeId.email} does not fully cover the shift (Coverage: ${coveragePercentage.toFixed(2)}%)`);
               continue;
@@ -2298,6 +2394,9 @@ router.post('/auto-schedule/:companyId', verifyUser, authorizeRoles(['Manager'])
             console.log('Saving shift for employee:', employee.employeeId?.email, shift);
             await shift.save();
             shifts.push(shift);
+
+            // Mark the employee as assigned for this day
+            employeesAssignedPerDay[day].add(employeeIdStr);
 
             if (!assignedTimeSlots.has(employeeIdStr)) {
               assignedTimeSlots.set(employeeIdStr, []);
@@ -2434,6 +2533,14 @@ router.get('/schedule/:companyId', verifyUser, async (req, res) => {
     if (!start.isValid() || !end.isValid() || start.isAfter(end)) {
       console.log('Validation failed: Invalid date range');
       return res.status(400).json({ message: 'Invalid date range.' });
+    }
+
+    // Add validation for startDate to prevent fetching before the current week
+    const today = dayjs().utc();
+    const currentWeekStart = today.subtract(today.day(), 'day'); // Sunday of the current week (e.g., May 4)
+    if (start.isBefore(currentWeekStart, 'day')) {
+      console.log('Validation failed: Cannot fetch shifts before the current week');
+      return res.status(400).json({ message: 'Cannot fetch shifts for weeks before the current week.' });
     }
 
     // Build query
