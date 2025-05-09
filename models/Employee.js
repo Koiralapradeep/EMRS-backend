@@ -16,7 +16,6 @@ const employeeSchema = new mongoose.Schema(
     employeeID: {
       type: String,
       required: true,
-      unique: true,
     },
     fullName: {
       type: String,
@@ -63,8 +62,10 @@ const employeeSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    
   },
   { timestamps: true }
 );
-
+// Ensure employeeID is unique within a company
+employeeSchema.index({ employeeID: 1, companyId: 1 }, { unique: true });
 export default mongoose.model('Employee', employeeSchema);

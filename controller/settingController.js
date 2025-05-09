@@ -23,7 +23,7 @@ const changePassword = async (req, res) => {
     }
 
     //  Fetch the user from the database
-    console.log("🔹 Fetching user by ID...");
+    console.log(" Fetching user by ID...");
     const user = await User.findById(userId);
 
     if (!user) {

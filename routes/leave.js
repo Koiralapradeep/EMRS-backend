@@ -3,76 +3,77 @@ import mongoose from "mongoose";
 import Leave from "../models/Leave.js";
 import Employee from "../models/Employee.js";
 import { verifyUser } from "../middleware/authMiddleware.js";
+import Notification from "../models/Notifications.js";
+import { sendNotification } from "../index.js";
+import User from "../models/User.js";
 
 const router = express.Router();
 
 /**
- * @route 
- * @desc    Add a new leave request (Employee only)
+ * @route POST /api/leave/add
+ * @desc Add a new leave request (Employee only)
  */
 router.post("/add", verifyUser, async (req, res) => {
   try {
+    console.log("Received leave request:", req.body); // Log incoming request
+    console.log("Authenticated user:", req.user); // Log user from middleware
+
     const { leaveType, fromDate, toDate, description } = req.body;
 
-    // Required fields validation
+    // Validate required fields
     if (!leaveType || !fromDate || !toDate || !description) {
+      console.log("Validation failed: Missing required fields");
       return res.status(400).json({ success: false, error: "All fields are required." });
     }
 
-    // Only employees can add leave requests
+    // Check user role
     if (req.user.role !== "Employee") {
+      console.log("Authorization failed: User is not an Employee");
       return res.status(403).json({ success: false, error: "Only employees can add leave requests." });
     }
 
-    // Employee must have a companyId
+    // Check company assignment
     if (!req.user.companyId) {
+      console.log("Authorization failed: No companyId for user");
       return res.status(403).json({ success: false, error: "You are not assigned to a company." });
     }
 
+    // Parse and validate dates
     const startDate = new Date(fromDate);
     const endDate = new Date(toDate);
     const todayMidnight = new Date();
     todayMidnight.setHours(0, 0, 0, 0);
 
     if (isNaN(startDate) || isNaN(endDate)) {
+      console.log("Validation failed: Invalid date format");
       return res.status(400).json({ success: false, error: "Invalid date format." });
     }
+
     if (startDate > endDate) {
+      console.log("Validation failed: Start date after end date");
       return res.status(400).json({ success: false, error: "Start date cannot be after end date." });
     }
     if (startDate < todayMidnight) {
+      console.log("Validation failed: Past date requested");
       return res.status(400).json({ success: false, error: "Cannot apply for past dates." });
     }
 
-    // Check for duplicate exact date range
-    const duplicateLeave = await Leave.findOne({
+    // Check for duplicate leave requests
+    console.log("Checking for existing leave...");
+    const existingLeave = await Leave.findOne({
       userId: req.user._id,
-      fromDate: startDate,
-      toDate: endDate,
+      companyId: req.user.companyId,
+      $or: [
+        { fromDate: { $lte: endDate }, toDate: { $gte: startDate } },
+        { fromDate: startDate, toDate: endDate }
+      ]
     });
-    if (duplicateLeave) {
-      return res.status(400).json({
-        success: false,
-        error: "You have already applied for leave on these dates.",
-      });
+    if (existingLeave) {
+      console.log("Validation failed: Duplicate leave found", existingLeave);
+      return res.status(400).json({ success: false, error: "You already have a leave request for these dates." });
     }
 
-    // Check for overlapping dates
-    const overlappingLeave = await Leave.findOne({
-      userId: req.user._id,
-      $or: [{ fromDate: { $lte: endDate }, toDate: { $gte: startDate } }],
-    });
-    if (overlappingLeave) {
-      return res.status(400).json({
-        success: false,
-        error: `You already have a leave request for ${new Date(
-          overlappingLeave.fromDate
-        ).toLocaleDateString()} to ${new Date(
-          overlappingLeave.toDate
-        ).toLocaleDateString()}.`,
-      });
-    }
-
+    // Create and save leave request
     const newLeave = new Leave({
       userId: req.user._id,
       companyId: req.user.companyId,
@@ -84,112 +85,108 @@ router.post("/add", verifyUser, async (req, res) => {
       appliedDate: new Date(),
     });
 
+    console.log("Attempting to save leave:", newLeave);
     const savedLeave = await newLeave.save();
+    console.log("Leave saved successfully:", savedLeave);
+
+    // Fetch employee name (still from Employee model)
+    const employee = await Employee.findById(req.user._id);
+    const employeeName = employee ? employee.name : "An employee";
+    console.log("Employee name:", employeeName);
+
+    // Fetch manager from User model
+    console.log("Fetching manager for companyId:", req.user.companyId);
+    const manager = await User.findOne({ role: "Manager", companyId: req.user.companyId });
+    if (!manager) {
+      console.log("No manager found for companyId:", req.user.companyId);
+      return res.status(201).json({
+        success: true,
+        message: "Leave request added, but no manager found to notify.",
+        leave: savedLeave,
+      });
+    }
+    console.log("Manager found:", manager);
+
+    // Create and save notification
+    const notification = new Notification({
+      recipient: manager._id,
+      sender: req.user._id,
+      type: "leave_request",
+      message: `${employeeName} has requested leave from ${fromDate} to ${toDate}.`,
+      isRead: false,
+    });
+
+    console.log("Attempting to save notification:", notification);
+    const savedNotification = await notification.save();
+    console.log("Notification saved:", savedNotification);
+
+    // Send notification
+    console.log("Sending notification to manager:", manager._id);
+    await sendNotification(manager._id.toString(), {
+      ...savedNotification.toObject(),
+      _id: savedNotification._id.toString(),
+    });
+    console.log("Notification sent successfully to manager:", manager._id);
+
     return res.status(201).json({
       success: true,
       message: "Leave request added successfully.",
       leave: savedLeave,
     });
   } catch (error) {
-    console.error("Error adding leave request:", error);
-    return res.status(500).json({ success: false, error: "Internal Server Error." });
+    console.error("Error in POST /api/leave/add:", error.stack);
+    return res.status(500).json({
+      success: false,
+      error: "Internal Server Error.",
+      details: error.message,
+    });
   }
 });
-
 /**
- * @route   GET /api/leave
- * @desc    Fetch leaves:
- */
-router.get("/", verifyUser, async (req, res) => {
-  try {
-    let query = {};
-    if (req.user.role === "Manager") {
-      query.companyId = req.user.companyId;
-    } else if (req.user.role === "Employee") {
-      query.userId = req.user._id;
-    }
-
-    const leaves = await Leave.find(query)
-      .populate({ path: "userId", select: "name" })
-      .lean();
-
-    // Attach additional employee details
-    const populatedLeaves = await Promise.all(
-      leaves.map(async (leave) => {
-        const employee = await Employee.findOne({ userId: leave.userId._id })
-          .populate({ path: "department", select: "departmentName" })
-          .lean();
-        return {
-          ...leave,
-          employeeID: employee?.employeeID || "N/A",
-          department: employee?.department?.departmentName || "N/A",
-        };
-      })
-    );
-
-    if (!populatedLeaves || populatedLeaves.length === 0) {
-      return res.status(404).json({ success: false, error: "No leave requests found." });
-    }
-
-    return res.status(200).json({ success: true, leaves: populatedLeaves });
-  } catch (error) {
-    console.error("Error fetching leaves:", error);
-    return res.status(500).json({ success: false, error: "Internal Server Error." });
-  }
-});
-
-/**
- * @route   GET /api/leave/:id
- * @desc    Fetch single leave with extra employee details
+ * @route GET /api/leave/:id
+ * @desc Fetch single leave with extra employee details
  */
 router.get("/:id", verifyUser, async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Validate the leave ID format
+    console.log("Fetching leave with ID:", id);
+
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        error: "Invalid leave ID format.",
-      });
+      return res.status(400).json({ success: false, error: "Invalid leave ID format." });
     }
 
-    // Find the leave by ID
     const leave = await Leave.findById(id)
       .populate({ path: "userId", select: "name email" })
       .lean();
 
+    console.log("Fetched leave:", leave);
+
     if (!leave) {
-      return res.status(404).json({
-        success: false,
-        error: "Leave request not found.",
-      });
+      return res.status(404).json({ success: false, error: "Leave request not found." });
     }
 
-    // If manager, must match manager's company
+    console.log("User role:", req.user.role);
+    console.log("Leave companyId:", leave.companyId, "User companyId:", req.user.companyId);
+    console.log("Leave userId:", leave.userId._id, "User _id:", req.user._id);
+
     if (req.user.role === "Manager") {
-      if (!leave.companyId || leave.companyId.toString() !== req.user.companyId) {
-        return res.status(403).json({
-          success: false,
-          error: "Unauthorized to view this leave.",
-        });
+      if (!leave.companyId || leave.companyId.toString() !== req.user.companyId.toString()) {
+        return res.status(403).json({ success: false, error: "Unauthorized to view this leave." });
       }
     }
 
-    // If employee, must own the leave
     if (req.user.role === "Employee") {
-      if (leave.userId._id.toString() !== req.user._id) {
-        return res.status(403).json({
-          success: false,
-          error: "Unauthorized to view this leave.",
-        });
+      if (leave.userId._id.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ success: false, error: "Unauthorized to view this leave." });
       }
     }
 
-    // Attach extra employee details
     const employee = await Employee.findOne({ userId: leave.userId._id })
       .populate({ path: "department", select: "departmentName" })
       .lean();
+
+    console.log("Fetched employee for leave:", employee);
 
     const finalLeave = {
       ...leave,
@@ -205,28 +202,31 @@ router.get("/:id", verifyUser, async (req, res) => {
 });
 
 /**
- * ROUTE B: Fetch ALL leaves for a single employee
- * GET /api/leave/employee/:employeeId
+ * @route GET /api/leave/employee/:employeeId
+ * @desc Fetch all leaves for a single employee
  */
 router.get("/employee/:employeeId", verifyUser, async (req, res) => {
   try {
     const { employeeId } = req.params;
 
-    // Validate employeeId format if needed (optional)
+    console.log("Request received for GET /api/leave/employee/:employeeId");
+    console.log("EmployeeId from params:", employeeId);
+    console.log("User details from middleware:", req.user);
+
     if (!mongoose.Types.ObjectId.isValid(employeeId)) {
-      return res.status(400).json({
-        success: false,
-        error: "Invalid employee ID format.",
-      });
+      console.log("Invalid employee ID format:", employeeId);
+      return res.status(400).json({ success: false, error: "Invalid employee ID format." });
     }
 
-    // Retrieve leaves for the specified employee and the manager's company
+    console.log("Fetching leaves for employeeId:", employeeId, "with companyId:", req.user.companyId);
+
     const leaves = await Leave.find({
       userId: employeeId,
       companyId: req.user.companyId,
     }).lean();
 
-    // Instead of an error when no leaves are found, return a success with an empty array
+    console.log("Fetched leaves:", leaves);
+
     if (!leaves || leaves.length === 0) {
       return res.status(200).json({
         success: true,
@@ -242,60 +242,104 @@ router.get("/employee/:employeeId", verifyUser, async (req, res) => {
   }
 });
 
+/**
+ * @route GET /api/leave/company/:companyId
+ * @desc Fetch all leaves for a company (Manager only)
+ */
+router.get("/company/:companyId", verifyUser, async (req, res) => {
+  try {
+    const { companyId } = req.params;
+
+    console.log("Fetching leaves for companyId:", companyId);
+    console.log("User details:", req.user);
+
+    if (!mongoose.Types.ObjectId.isValid(companyId)) {
+      return res.status(400).json({ success: false, error: "Invalid company ID format." });
+    }
+
+    if (req.user.role !== "Manager") {
+      return res.status(403).json({ success: false, error: "Only managers can view company leaves." });
+    }
+
+    if (companyId !== req.user.companyId) {
+      return res.status(403).json({ success: false, error: "Unauthorized to view leaves for this company." });
+    }
+
+    const leaves = await Leave.find({ companyId })
+      .populate({ path: "userId", select: "name email" })
+      .lean();
+
+    console.log("Fetched company leaves:", leaves);
+
+    if (!leaves || leaves.length === 0) {
+      return res.status(200).json({
+        success: true,
+        leaves: [],
+        message: "No leaves found for this company.",
+      });
+    }
+
+    const leavesWithEmployeeDetails = await Promise.all(
+      leaves.map(async (leave) => {
+        const employee = await Employee.findOne({ userId: leave.userId._id })
+          .populate({ path: "department", select: "departmentName" })
+          .lean();
+
+        return {
+          ...leave,
+          employeeID: employee?.employeeID || "N/A",
+          department: employee?.department?.departmentName || "N/A",
+        };
+      })
+    );
+
+    return res.status(200).json({ success: true, leaves: leavesWithEmployeeDetails });
+  } catch (error) {
+    console.error("Error fetching company leaves:", error);
+    return res.status(500).json({ success: false, error: "Internal Server Error." });
+  }
+});
 
 /**
- * @route   PUT /api/leave/:id/status
- * @desc    Approve/Reject a leave (Manager only)
+ * @route PUT /api/leave/:id/status
+ * @desc Approve/Reject a leave (Manager only)
  */
 router.put("/:id/status", verifyUser, async (req, res) => {
   try {
-    console.log(">>> PUT /api/leave/:id/status triggered");
     const { id } = req.params;
     const { status } = req.body;
-
-    console.log(">>> ID:", id, " Status:", status);
-    console.log(">>> req.user:", req.user);
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ success: false, error: "Invalid leave ID format." });
     }
+
     if (!status || !["Pending", "Approved", "Rejected"].includes(status)) {
       return res.status(400).json({ success: false, error: "Invalid leave status." });
     }
 
     const leave = await Leave.findById(id);
-    console.log(">>> Found leave:", leave);
 
     if (!leave) {
       return res.status(404).json({ success: false, error: "Leave request not found." });
     }
 
-    // Must be manager
     if (req.user.role !== "Manager") {
-      console.log(">>> FAIL: Not manager, role:", req.user.role);
       return res.status(403).json({ success: false, error: "Only managers can update leave status." });
     }
 
-    // Debug logs for company
-    console.log(">>> leave.companyId:", leave.companyId);
-    console.log(">>> req.user.companyId:", req.user.companyId);
-
-    // Ensure companyId exists in both objects
-    if (!leave.companyId || !req.user.companyId) {
-      console.log(">>> FAIL: One of them is missing, returning 500 to avoid crash");
-      return res.status(500).json({ success: false, error: "companyId missing. Check server logs and DB data." });
-    }
-
-    // Compare company IDs as strings
-    if (leave.companyId.toString() !== req.user.companyId.toString()) {
-      console.log(">>> FAIL: Company ID mismatch", leave.companyId.toString(), req.user.companyId.toString());
-      return res.status(403).json({ success: false, error: "Unauthorized to modify this leave." });
-    }
-
-    // If all is good, update status
     leave.status = status;
     await leave.save();
-    console.log(">>> SUCCESS: Updated status to", status);
+
+    const notification = new Notification({
+      recipient: leave.userId.toString(),
+      sender: req.user._id,
+      type: status === "Approved" ? "leave_approved" : "leave_rejected",
+      message: `Your leave request has been ${status.toLowerCase()}.`,
+      isRead: false,
+    });
+
+    await notification.save();
+    await sendNotification(leave.userId.toString(), { ...notification.toObject(), _id: notification._id.toString() });
 
     return res.status(200).json({
       success: true,
@@ -309,12 +353,14 @@ router.put("/:id/status", verifyUser, async (req, res) => {
 });
 
 /**
- * @route   DELETE /api/leave/:id
- * @desc    Delete a leave (Manager or owner Employee)
+ * @route DELETE /api/leave/:id
+ * @desc Delete a leave (Manager or owner Employee)
  */
 router.delete("/:id", verifyUser, async (req, res) => {
   try {
     const { id } = req.params;
+    console.log("Deleting leave with ID:", id);
+
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ success: false, error: "Invalid leave ID format." });
     }
@@ -324,33 +370,30 @@ router.delete("/:id", verifyUser, async (req, res) => {
       return res.status(404).json({ success: false, error: "Leave not found." });
     }
 
-    console.log(">>> leave.companyId:", leave.companyId);
-    console.log(">>> req.user.companyId:", req.user.companyId);
+    console.log("Leave companyId:", leave.companyId);
+    console.log("User companyId:", req.user.companyId);
 
-    // Ensure companyId exists in both objects
     if (!leave.companyId || !req.user.companyId) {
-      console.log(">>> FAIL: One of them is missing, returning 500 to avoid crash");
+      console.log("FAIL: companyId missing in leave or user");
       return res.status(500).json({ success: false, error: "companyId missing. Check server logs and DB data." });
     }
 
-    // Manager can delete if leave belongs to same company
     if (req.user.role === "Manager") {
       if (leave.companyId.toString() !== req.user.companyId.toString()) {
-        console.log(">>> FAIL: Manager unauthorized to delete this leave");
+        console.log("FAIL: Manager unauthorized to delete this leave");
         return res.status(403).json({ success: false, error: "Not authorized to delete this leave." });
       }
     }
 
-    // Employee can delete only if they own the leave
     if (req.user.role === "Employee") {
       if (leave.userId.toString() !== req.user._id.toString()) {
-        console.log(">>> FAIL: Employee unauthorized to delete this leave");
+        console.log("FAIL: Employee unauthorized to delete this leave");
         return res.status(403).json({ success: false, error: "Not authorized to delete this leave." });
       }
     }
 
     await leave.deleteOne();
-    console.log(">>> SUCCESS: Leave deleted");
+    console.log("SUCCESS: Leave deleted");
     return res.status(200).json({ success: true, message: "Leave deleted successfully." });
   } catch (error) {
     console.error("Error deleting leave:", error);

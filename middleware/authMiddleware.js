@@ -1,81 +1,124 @@
-import jwt from "jsonwebtoken";
-import User from "../models/User.js";
+import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
+import User from '../models/User.js';
+import Employee from '../models/Employee.js';
 
-/**
- * Verify User Middleware (Ensures user authentication)
- */
+const verifyToken = (token) => {
+  if (!process.env.JWT_SECRET) {
+    throw new Error('JWT_SECRET is not defined in environment variables.');
+  }
+  return jwt.verify(token, process.env.JWT_SECRET);
+};
+
 const verifyUser = async (req, res, next) => {
   try {
-    console.log("🔍 Incoming Headers:", req.headers);
+    console.log('DEBUG - Verifying user for request:', req.method, req.url);
+    console.log('DEBUG - Incoming Headers:', req.headers);
+    console.log('DEBUG - Cookies:', req.cookies);
 
-    //  Extract token from Authorization header or cookies
+    if (mongoose.connection.readyState !== 1) {
+      console.error('AUTH ERROR: Database not connected. Current state:', mongoose.connection.readyState);
+      return res.status(500).json({ success: false, error: 'Database not connected' });
+    }
+
     let token;
+    let tokenSource = 'none';
     if (req.headers.authorization) {
-      const authParts = req.headers.authorization.split(" ");
-      if (authParts.length === 2 && authParts[0] === "Bearer") {
-        token = authParts[1];
+      const authParts = req.headers.authorization.split(' ');
+      if (authParts.length === 2 && authParts[0] === 'Bearer') {
+        token = authParts[1].trim();
+        tokenSource = 'header';
+      } else {
+        console.error('AUTH ERROR: Malformed Authorization header:', req.headers.authorization);
+        return res.status(401).json({ success: false, error: 'Invalid Authorization header format' });
       }
-    }
-    if (!token && req.cookies?.jwt) {
-      token = req.cookies.jwt;
-    }
-
-    if (!token) {
-      console.error("AUTH ERROR: No token provided.");
-      return res.status(401).json({ success: false, error: "Unauthorized: No token provided" });
+    } else if (req.cookies?.jwt) {
+      token = req.cookies.jwt.trim();
+      tokenSource = 'cookie';
+    } else {
+      console.error('AUTH ERROR: No token provided.');
+      return res.status(401).json({ success: false, error: 'No token provided' });
     }
 
-    console.log("Extracted Token:", token);
+    console.log(`DEBUG - Token extracted from ${tokenSource} for ${req.method} ${req.url}`);
+    console.log(`DEBUG - Token (truncated): ${token.slice(0, 10) + '...'}`);
 
-    //  Decode and verify JWT token
+    const tokenParts = token.split('.');
+    if (tokenParts.length !== 3 || tokenParts.some((part) => !part)) {
+      console.error(`AUTH ERROR: Token from ${tokenSource} does not have 3 valid parts:`, token);
+      return res.status(401).json({ success: false, error: 'Invalid token format' });
+    }
+
     let decoded;
     try {
-      decoded = jwt.verify(token, process.env.JWT_KEY);
+      decoded = verifyToken(token);
+      console.log(`DEBUG - Decoded token (from ${tokenSource}):`, decoded);
     } catch (err) {
-      console.error("AUTH ERROR: Invalid or expired token:", err.message);
-      return res.status(401).json({ success: false, error: "Invalid or expired token" });
+      if (err.name === 'TokenExpiredError') {
+        console.error('AUTH ERROR: Token expired:', err.message);
+        return res.status(401).json({ success: false, error: 'Token expired' });
+      } else {
+        console.error('AUTH ERROR: Token verification failed:', err.message);
+        return res.status(401).json({ success: false, error: 'Invalid token' });
+      }
     }
 
-    if (!decoded?.id) {
-      console.error("AUTH ERROR: Missing user ID in token payload.");
-      return res.status(401).json({ success: false, error: "Invalid token payload" });
+    if (!decoded?.id || !decoded?.role || !decoded?.email) {
+      console.error(`AUTH ERROR: Missing required fields in token payload (from ${tokenSource}):`, decoded);
+      return res.status(401).json({ success: false, error: 'Invalid token payload' });
     }
 
-    //  Fetch user from database and populate company if needed
-    const user = await User.findById(decoded.id).select("-password").populate("companyId", "name");
+    console.log('DEBUG - Fetching user for ID:', decoded.id);
+    const user = await User.findById(decoded.id).select('-password').populate('companyId', 'name');
+    console.log('DEBUG - User query result:', user);
     if (!user) {
-      console.error("AUTH ERROR: User not found.");
-      return res.status(404).json({ success: false, error: "User not found" });
+      console.error('AUTH ERROR: User not found for ID:', decoded.id);
+      return res.status(401).json({ success: false, error: 'User not found' });
     }
 
-    //  Attach user data to req
+    console.log('DEBUG - Fetching employee for userId:', decoded.id);
+    const employee = await Employee.findOne({ userId: decoded.id }).select('department').lean();
+    console.log('DEBUG - Employee query result for userId:', decoded.id, 'Result:', employee);
+    const departmentId = employee?.department ? employee.department.toString() : null;
+    if (!employee) {
+      console.warn(`No employee record found for userId: ${decoded.id}`);
+    } else if (!employee.department) {
+      console.warn(`Employee record found for userId: ${decoded.id}, but no department specified`);
+    }
+
     req.user = {
       _id: user._id.toString(),
       email: user.email,
       role: user.role,
-      // If user.companyId is an ObjectId reference, we store the _id as a string:
       companyId: user.companyId ? user.companyId._id.toString() : null,
-      companyName: user.companyId ? user.companyId.name : "No Company",
+      companyName: user.companyId ? user.companyId.name : 'No Company',
+      departmentId: departmentId,
     };
 
-    console.log(`DEBUG - Middleware assigned companyId: ${req.user.companyId || "N/A"} for User: ${user.email}`);
-
+    console.log(`DEBUG - User authenticated:`, req.user);
     next();
   } catch (error) {
-    console.error("AUTH ERROR (unexpected):", error.message);
-    return res.status(401).json({ success: false, error: "Invalid or expired token" });
+    console.error('AUTH ERROR (unexpected):', error.message);
+    return res.status(500).json({ success: false, error: 'Server error during authentication: ' + error.message });
   }
 };
 
-/**
- * Role-Based Authorization Middleware
- */
 const authorizeRoles = (allowedRoles) => {
   return (req, res, next) => {
-    if (!req.user || !allowedRoles.includes(req.user.role)) {
-      console.error(`Access denied for role: ${req.user ? req.user.role : "undefined"}`);
-      return res.status(403).json({ success: false, error: "Access denied" });
+    if (!req.user || !req.user.role) {
+      console.error('Access denied: No role found for user');
+      return res.status(403).json({ success: false, error: 'Access denied: No user role found' });
     }
+
+    const userRole = req.user.role.toLowerCase();
+    const normalizedAllowedRoles = allowedRoles.map((role) => role.toLowerCase());
+
+    if (!normalizedAllowedRoles.includes(userRole)) {
+      console.error(`Access denied for role: ${req.user.role}. Allowed roles: ${allowedRoles}`);
+      return res.status(403).json({ success: false, error: `Access denied: Role ${req.user.role} not authorized` });
+    }
+
+    console.log(`DEBUG - Role authorized: ${req.user.role}, Allowed roles: ${allowedRoles}`);
     next();
   };
 };
