@@ -15,8 +15,8 @@ const router = express.Router();
  */
 router.post("/add", verifyUser, async (req, res) => {
   try {
-    console.log("Received leave request:", req.body); // Log incoming request
-    console.log("Authenticated user:", req.user); // Log user from middleware
+    console.log("Received leave request:", req.body);
+    console.log("Authenticated user:", req.user);
 
     const { leaveType, fromDate, toDate, description } = req.body;
 
@@ -65,8 +65,8 @@ router.post("/add", verifyUser, async (req, res) => {
       companyId: req.user.companyId,
       $or: [
         { fromDate: { $lte: endDate }, toDate: { $gte: startDate } },
-        { fromDate: startDate, toDate: endDate }
-      ]
+        { fromDate: startDate, toDate: endDate },
+      ],
     });
     if (existingLeave) {
       console.log("Validation failed: Duplicate leave found", existingLeave);
@@ -89,9 +89,8 @@ router.post("/add", verifyUser, async (req, res) => {
     const savedLeave = await newLeave.save();
     console.log("Leave saved successfully:", savedLeave);
 
-    // Fetch employee name (still from Employee model)
-    const employee = await Employee.findById(req.user._id);
-    const employeeName = employee ? employee.name : "An employee";
+    // Fetch employee name from req.user (already available)
+    const employeeName = req.user.name || "Employee";
     console.log("Employee name:", employeeName);
 
     // Fetch manager from User model
@@ -107,12 +106,13 @@ router.post("/add", verifyUser, async (req, res) => {
     }
     console.log("Manager found:", manager);
 
-    // Create and save notification
+    // Create and save notification with detailed message
     const notification = new Notification({
       recipient: manager._id,
       sender: req.user._id,
       type: "leave_request",
-      message: `${employeeName} has requested leave from ${fromDate} to ${toDate}.`,
+      message: `${employeeName} has submitted a ${leaveType} leave request from ${fromDate} to ${toDate}.`,
+      leaveId: savedLeave._id, // Add leaveId to link the notification to the leave request
       isRead: false,
     });
 
@@ -120,12 +120,18 @@ router.post("/add", verifyUser, async (req, res) => {
     const savedNotification = await notification.save();
     console.log("Notification saved:", savedNotification);
 
-    // Send notification
-    console.log("Sending notification to manager:", manager._id);
-    await sendNotification(manager._id.toString(), {
+    // Ensure all ObjectIds are converted to strings for frontend compatibility
+    const notificationPayload = {
       ...savedNotification.toObject(),
       _id: savedNotification._id.toString(),
-    });
+      recipient: savedNotification.recipient.toString(),
+      sender: savedNotification.sender.toString(),
+      leaveId: savedNotification.leaveId.toString(), // Convert leaveId to string
+    };
+
+    // Send notification
+    console.log("Sending notification to manager:", manager._id);
+    await sendNotification(manager._id.toString(), notificationPayload);
     console.log("Notification sent successfully to manager:", manager._id);
 
     return res.status(201).json({
@@ -318,7 +324,6 @@ router.put("/:id/status", verifyUser, async (req, res) => {
     }
 
     const leave = await Leave.findById(id);
-
     if (!leave) {
       return res.status(404).json({ success: false, error: "Leave request not found." });
     }
@@ -330,16 +335,30 @@ router.put("/:id/status", verifyUser, async (req, res) => {
     leave.status = status;
     await leave.save();
 
+    // Fetch manager name
+    const manager = await User.findById(req.user._id);
+    const managerName = manager ? manager.name : "your manager";
+
+    // Create notification with detailed message
     const notification = new Notification({
       recipient: leave.userId.toString(),
       sender: req.user._id,
       type: status === "Approved" ? "leave_approved" : "leave_rejected",
-      message: `Your leave request has been ${status.toLowerCase()}.`,
+      message: `Your ${leave.leaveType} leave request from ${leave.fromDate.toISOString().split("T")[0]} to ${leave.toDate.toISOString().split("T")[0]} has been ${status.toLowerCase()} by ${managerName}.`,
       isRead: false,
     });
 
     await notification.save();
-    await sendNotification(leave.userId.toString(), { ...notification.toObject(), _id: notification._id.toString() });
+
+    // Ensure all ObjectIds are converted to strings for frontend compatibility
+    const notificationPayload = {
+      ...notification.toObject(),
+      _id: notification._id.toString(),
+      recipient: notification.recipient.toString(),
+      sender: notification.sender.toString(),
+    };
+
+    await sendNotification(leave.userId.toString(), notificationPayload);
 
     return res.status(200).json({
       success: true,

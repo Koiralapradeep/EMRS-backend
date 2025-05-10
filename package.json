@@ -12,12 +12,15 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@heroicons/react": "^2.2.0",
     "@sendgrid/mail": "^8.1.5",
     "axios": "^1.8.4",
     "bcrypt": "^5.1.1",
     "bcryptjs": "^3.0.2",
     "body-parser": "^1.20.3",
+    "buffer": "^6.0.3",
     "chart.js": "^4.4.9",
+    "connect-mongo": "^5.1.0",
     "cookie-parser": "^1.4.7",
     "cores": "^0.8.0",
     "cors": "^2.8.5",
@@ -36,7 +39,6 @@
     "mongoose": "^8.13.2",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^6.10.1",
-    "nodemon": "^3.1.7",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "path": "^0.12.7",
@@ -50,9 +52,11 @@
     "react-router-dom": "^7.5.1",
     "react-toastify": "^11.0.5",
     "socket.io": "^4.8.1",
-    "socket.io-client": "^4.8.1"
+    "socket.io-client": "^4.8.1",
+    "util": "^0.12.5"
   },
   "devDependencies": {
-    "@types/mongoose": "^5.11.96"
+    "@types/mongoose": "^5.11.96",
+    "nodemon": "^3.1.10"
   }
 }

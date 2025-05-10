@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import session from "express-session";
+import MongoStore from "connect-mongo"; // Add this import
 import connectDB from "./db/DB.js";
 import authRoutes from "./routes/auth.js";
 import googleAuth from "./routes/googleAuth.js";
@@ -21,20 +22,29 @@ import availability from "./routes/availability.js";
 import passport from "passport";
 import holiday from "./routes/holidays.js";
 import User from './models/User.js';
-import ShiftRequirement  from "./routes/availability.js";
 import shiftswap from "./routes/shiftswap.js";
-import ShiftSwapRequest from './models/ShiftSwap.js';
+import admin from "./routes/admin.js";
 
-// Load environment variables
-dotenv.config();
+// Load environment variables first
+dotenv.config({ path: './.env' });
+console.log('DEBUG - Loaded .env file');
 
-// Log environment variables to debug (avoid logging sensitive values in production)
+// Validate environment variables
+const requiredEnvVars = ["JWT_SECRET", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "MONGO_URI"];
+requiredEnvVars.forEach((varName) => {
+  if (!process.env[varName]) {
+    console.error(`ERROR: Missing environment variable: ${varName}`);
+    throw new Error(`Missing required environment variable: ${varName}`);
+  }
+});
+
+// Log environment variables for debugging
+console.log("DEBUG - MONGO_URI:", process.env.MONGO_URI);
 console.log("DEBUG - JWT_SECRET:", process.env.JWT_SECRET ? "Defined" : "Undefined");
 console.log("DEBUG - GOOGLE_CLIENT_ID:", process.env.GOOGLE_CLIENT_ID ? "Defined" : "Undefined");
 console.log("DEBUG - GOOGLE_CLIENT_SECRET:", process.env.GOOGLE_CLIENT_SECRET ? "Defined" : "Undefined");
-console.log("DEBUG - PORT:", process.env.PORT);
-console.log("DEBUG - BASE_URL:", process.env.BASE_URL);
-console.log("DEBUG - CALLBACK_URL:", process.env.CALLBACK_URL);
+console.log("DEBUG - PORT:", process.env.PORT || 3000);
+console.log("DEBUG - SESSION_SECRET:", process.env.SESSION_SECRET ? "Defined" : "Undefined");
 
 // Initialize Express app and HTTP server
 const app = express();
@@ -49,13 +59,10 @@ const io = new Server(server, {
   },
 });
 
-// WebSocket user map
+// WebSocket user map and connection handling
 const users = new Map();
-
-// WebSocket connection handling
 io.on("connection", (socket) => {
   console.log(`User connected: ${socket.id}`);
-
   socket.on("register", (token) => {
     try {
       if (!token || token.length < 20) {
@@ -63,20 +70,17 @@ io.on("connection", (socket) => {
         socket.emit("auth_error", { message: "Invalid token. Please re-authenticate." });
         return;
       }
-
       if (!process.env.JWT_SECRET) {
         console.error("ERROR - JWT_SECRET is not defined in environment variables.");
         socket.emit("auth_error", { message: "Server error: JWT_SECRET missing." });
         return;
       }
-
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       if (!decoded || !decoded.id) {
         console.log("Invalid token. Cannot extract user ID.");
         socket.emit("auth_error", { message: "Invalid token. Please re-authenticate." });
         return;
       }
-
       const userId = decoded.id.toString();
       users.set(userId, socket.id);
       console.log(`User ${userId} registered with socket ID ${socket.id}`);
@@ -85,7 +89,6 @@ io.on("connection", (socket) => {
       socket.emit("auth_error", { message: "Invalid token. Please re-authenticate." });
     }
   });
-
   socket.on("disconnect", (reason) => {
     console.log(`User disconnected: ${socket.id}, Reason: ${reason}`);
     for (const [userId, socketId] of users.entries()) {
@@ -96,21 +99,17 @@ io.on("connection", (socket) => {
       }
     }
   });
-
   socket.on("reconnect_attempt", () => {
     console.log("WebSocket trying to reconnect...");
   });
-
   socket.on("reconnect", () => {
     console.log("WebSocket reconnected.");
   });
-
   socket.on("reconnect_error", (error) => {
     console.error("WebSocket reconnection error:", error.message);
   });
 });
 
-// Export sendNotification function for other modules
 export const sendNotification = async (recipientId, notificationData) => {
   try {
     const socketId = users.get(recipientId.toString());
@@ -133,12 +132,16 @@ app.use(cors({
 app.use(express.json());
 app.use(cookieParser());
 
-// Add express-session middleware for Passport
+// Session middleware with MongoStore
 app.use(
   session({
-    secret: process.env.JWT_SECRET || "fallback-secret",
+    secret: process.env.SESSION_SECRET || process.env.JWT_SECRET,
     resave: false,
     saveUninitialized: false,
+    store: MongoStore.create({
+      mongoUrl: process.env.MONGO_URI,
+      collectionName: "sessions",
+    }),
     cookie: {
       secure: process.env.NODE_ENV === "production",
       httpOnly: true,
@@ -147,20 +150,16 @@ app.use(
   })
 );
 
-// Initialize Passport with session support
+// Initialize Passport
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Serve static files
+// Serve static files and routes
 app.use("/public/uploads", express.static("public/uploads"));
-
-// Debug middleware to log all incoming requests
 app.use((req, res, next) => {
   console.log(`DEBUG - Incoming request: ${req.method} ${req.url}`);
   next();
 });
-
-// Mount Routes
 app.use("/api/auth", authRoutes);
 app.use("/auth", googleAuth);
 app.use("/api/employee", employee);
@@ -175,12 +174,12 @@ app.use("/api/availability", availability);
 app.use("/api/holidays", holiday);
 app.use('/api/users', User);
 app.use('/api/shift-swap', shiftswap);
-// Basic route for debugging
+app.use('/api/admin', admin);
 app.get("/", (req, res) => {
   res.send("Backend server is running!");
 });
 
-// Connect to MongoDB and start server
+// Start server
 const PORT = process.env.PORT || 3000;
 connectDB().then(() => {
   server.listen(PORT, () => console.log(`Server running on port ${PORT}`));

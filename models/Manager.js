@@ -1,12 +1,11 @@
-import mongoose from "mongoose";
+import mongoose from 'mongoose';
+import Holiday from './Holidays.js'; // Import the Holiday model
 
-const holidaySchema = new mongoose.Schema({
-  companyId: { type: mongoose.Schema.Types.ObjectId, required: true, ref: 'Company' },
-  startDate: { type: String, required: true },
-  endDate: { type: String, required: true }, 
-  name: { type: String, required: true }, 
-  createdAt: { type: Date, default: Date.now }
+const managerSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
+  holidays: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Holiday' }], // Reference Holiday
+  createdAt: { type: Date, default: Date.now },
 });
 
-const Holiday = mongoose.model("Holiday", holidaySchema);
-export default Holiday;
+export default mongoose.model('Manager', managerSchema);

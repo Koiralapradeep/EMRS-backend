@@ -416,9 +416,9 @@ router.post('/', verifyUser, async (req, res) => {
 router.get('/:employeeId', verifyUser, async (req, res) => {
   try {
     const { employeeId } = req.params;
-    const { companyId, weekStartDate } = req.query;
+    const { companyId, weekStartDate, availabilityId } = req.query;
 
-    console.log('Fetching availability for employee:', employeeId, 'companyId:', companyId, 'weekStartDate:', weekStartDate);
+    console.log('Fetching availability for employee:', employeeId, 'companyId:', companyId, 'weekStartDate:', weekStartDate, 'availabilityId:', availabilityId);
 
     if (!companyId || !mongoose.Types.ObjectId.isValid(companyId)) {
       console.log('Validation failed: Invalid companyId');
@@ -436,36 +436,46 @@ router.get('/:employeeId', verifyUser, async (req, res) => {
       console.log('Validation failed: Invalid weekStartDate');
       return res.status(400).json({ message: 'Invalid weekStartDate.' });
     }
+    if (availabilityId && !mongoose.Types.ObjectId.isValid(availabilityId)) {
+      console.log('Validation failed: Invalid availabilityId');
+      return res.status(400).json({ message: 'Invalid availabilityId.' });
+    }
 
     const query = { employeeId, companyId };
     if (weekStartDate) {
-      const date = new Date(weekStartDate);
-      date.setHours(0, 0, 0, 0);
-      query.weekStartDate = date;
-      console.log('Querying with weekStartDate:', date);
+      const weekStart = dayjs.utc(weekStartDate, 'YYYY-MM-DD').startOf('day');
+      const formattedWeekStartDate = new Date(Date.UTC(weekStart.year(), weekStart.month(), weekStart.date()));
+      query.weekStartDate = formattedWeekStartDate;
+      console.log('Querying with weekStartDate (UTC):', formattedWeekStartDate);
+    }
+    if (availabilityId) {
+      query._id = availabilityId;
+      console.log('Querying with availabilityId:', availabilityId);
     }
 
-    const availability = await Availability.findOne(query).lean();
-    console.log('Found availability with weekStartDate:', availability?.weekStartDate);
-
-    if (availability) {
-      return res.status(200).json(availability);
+    console.log('Executing query:', query);
+    let responseData;
+    if (weekStartDate || availabilityId) {
+      const availability = await Availability.findOne(query).lean();
+      console.log('Found availability for specific week or ID:', availability);
+      if (!availability) {
+        console.log('No availability found for the specified criteria');
+        return res.status(404).json({ message: 'No availability found for the specified week or ID.' });
+      }
+      responseData = availability;
     } else {
-      console.log('No availability found for query:', query);
-      return res.status(200).json({
-        days: {
-          sunday: { available: false, slots: [], note: '' },
-          monday: { available: false, slots: [], note: '' },
-          tuesday: { available: false, slots: [], note: '' },
-          wednesday: { available: false, slots: [], note: '' },
-          thursday: { available: false, slots: [], note: '' },
-          friday: { available: false, slots: [], note: '' },
-          saturday: { available: false, slots: [], note: '' },
-        },
-        note: '',
-        isRecurring: false,
-      });
+      const availabilities = await Availability.find(query).sort({ weekStartDate: -1 }).lean();
+      console.log('Found all availabilities:', availabilities);
+      console.log('Total availabilities found:', availabilities.length);
+      console.log('Week start dates:', availabilities.map(a => new Date(a.weekStartDate).toISOString()));
+      if (!availabilities || availabilities.length === 0) {
+        console.log('No availabilities found for the specified criteria');
+        return res.status(404).json({ message: 'No availabilities found.' });
+      }
+      responseData = availabilities;
     }
+
+    return res.status(200).json(responseData);
   } catch (error) {
     console.error('Error fetching availability:', error);
     return res.status(500).json({ message: 'Failed to fetch availability.', error: error.message });
@@ -630,6 +640,7 @@ router.put('/:id', verifyUser, async (req, res) => {
 
     console.log('Received PUT /api/availability/:id payload:', JSON.stringify(req.body, null, 2));
 
+    // Validate IDs
     if (!mongoose.Types.ObjectId.isValid(id)) {
       console.log('Validation failed: Invalid availability ID');
       return res.status(400).json({ message: 'Invalid availability ID.' });
@@ -643,17 +654,20 @@ router.put('/:id', verifyUser, async (req, res) => {
       return res.status(400).json({ message: 'Invalid companyId.' });
     }
 
+    // Authorization check
     if (req.user._id.toString() !== employeeId && req.user.role !== 'Admin') {
       console.log('Authorization failed:', req.user._id, employeeId);
       return res.status(403).json({ message: 'Unauthorized: You can only edit your own availability.' });
     }
 
+    // Find the existing availability
     const availability = await Availability.findById(id);
     if (!availability) {
       console.log('Availability not found:', id);
       return res.status(404).json({ message: 'Availability not found.' });
     }
 
+    // Verify ownership
     if (availability.employeeId.toString() !== employeeId) {
       console.log('Unauthorized: Employee ID mismatch', { availabilityEmployeeId: availability.employeeId, employeeId });
       return res.status(403).json({ message: 'You are not authorized to edit this availability.' });
@@ -661,50 +675,78 @@ router.put('/:id', verifyUser, async (req, res) => {
 
     const updateFields = {};
 
+    // Update weekStartDate if provided
     if (weekStartDate) {
-      const weekStart = dayjs(weekStartDate).utc();
+      // Explicitly parse as UTC and normalize to midnight
+      const weekStart = dayjs.utc(weekStartDate).startOf('day');
+      console.log('Parsed weekStartDate (UTC):', weekStart.toISOString(), 'Day of week (0=Sunday):', weekStart.day());
+
       if (!weekStart.isValid()) {
         console.log('Validation failed: Invalid weekStartDate');
         return res.status(400).json({ message: 'Invalid weekStartDate.' });
       }
+
+      // Force adjustment to a Sunday if not already
       if (weekStart.day() !== 0) {
-        console.log('Validation failed: weekStartDate not a Sunday');
-        return res.status(400).json({ message: 'weekStartDate must be a Sunday.' });
+        const daysSinceLastSunday = weekStart.day();
+        const adjustedWeekStart = weekStart.subtract(daysSinceLastSunday, 'day');
+        console.log('Adjusted weekStartDate to Sunday:', adjustedWeekStart.toISOString(), 'Day of week:', adjustedWeekStart.day());
+        return res.status(400).json({ message: `weekStartDate must be a Sunday. Received ${weekStart.format('YYYY-MM-DD')} (day ${weekStart.day()}). Adjusted to ${adjustedWeekStart.format('YYYY-MM-DD')}, please resubmit.` });
       }
+
       if (weekStart.isBefore(dayjs().utc().startOf('day'))) {
         console.log('Validation failed: weekStartDate not in future');
         return res.status(400).json({ message: 'weekStartDate must be in the future.' });
       }
-      updateFields.weekStartDate = new Date(weekStartDate);
+
+      updateFields.weekStartDate = new Date(weekStart.toISOString());
+      console.log('weekStartDate set for update:', updateFields.weekStartDate);
     }
 
+    // Update weekEndDate if provided
     if (weekEndDate) {
-      const weekEnd = dayjs(weekEndDate).utc();
+      const weekEnd = dayjs.utc(weekEndDate).startOf('day');
+      console.log('Parsed weekEndDate (UTC):', weekEnd.toISOString(), 'Day of week (6=Saturday):', weekEnd.day());
+
       if (!weekEnd.isValid()) {
         console.log('Validation failed: Invalid weekEndDate');
         return res.status(400).json({ message: 'Invalid weekEndDate.' });
       }
+
       if (weekEnd.day() !== 6) {
         console.log('Validation failed: weekEndDate not a Saturday');
         return res.status(400).json({ message: 'weekEndDate must be a Saturday.' });
       }
+
       if (updateFields.weekStartDate) {
-        const diffDays = weekEnd.diff(dayjs(weekStartDate).utc(), 'day');
+        const diffDays = weekEnd.diff(dayjs(updateFields.weekStartDate).utc(), 'day');
         if (diffDays !== 6) {
           console.log('Validation failed: weekEndDate not 6 days after weekStartDate');
           return res.status(400).json({ message: 'weekEndDate must be exactly 6 days after weekStartDate.' });
         }
       }
-      updateFields.weekEndDate = new Date(weekEndDate);
+
+      updateFields.weekEndDate = new Date(weekEnd.toISOString());
+      console.log('weekEndDate set for update:', updateFields.weekEndDate);
     }
 
+    // Update days if provided
     if (days && typeof days === 'object') {
       const validDays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
       const daysOfWeekIndices = validDays.reduce((acc, day, idx) => {
         acc[day] = idx;
         return acc;
       }, {});
-      const mergedDays = { ...availability.days };
+
+      const mergedDays = validDays.reduce((acc, day) => {
+        acc[day] = {
+          available: false,
+          slots: [],
+          note: '',
+        };
+        return acc;
+      }, {});
+
       for (const day of validDays) {
         if (days[day] && typeof days[day] === 'object') {
           const { available, slots, note: dayNote } = days[day];
@@ -712,6 +754,16 @@ router.put('/:id', verifyUser, async (req, res) => {
             console.log(`Validation failed: Invalid available flag for ${day}`);
             return res.status(400).json({ message: `Invalid available flag for ${day}.` });
           }
+
+          if (!available) {
+            mergedDays[day] = {
+              available: false,
+              slots: [],
+              note: dayNote && typeof dayNote === 'string' ? dayNote : '',
+            };
+            continue;
+          }
+
           if (!Array.isArray(slots)) {
             console.log(`Validation failed: Slots must be an array for ${day}`);
             return res.status(400).json({ message: `Slots must be an array for ${day}.` });
@@ -751,27 +803,15 @@ router.put('/:id', verifyUser, async (req, res) => {
             console.log(`Validation failed: Invalid note for ${day}`);
             return res.status(400).json({ message: `Note must be a string for ${day}.` });
           }
-          mergedDays[day] = days[day];
+          mergedDays[day] = {
+            available,
+            slots: available ? slots : [],
+            note: dayNote || '',
+          };
         }
       }
+      console.log('Merged days before update:', JSON.stringify(mergedDays, null, 2));
       updateFields.days = mergedDays;
-
-      const totalHours = validDays.reduce((sum, day) => {
-        if (!mergedDays[day].available) return sum;
-        return sum + mergedDays[day].slots.reduce((daySum, slot) => {
-          const startDayIdx = daysOfWeekIndices[slot.startDay];
-          const endDayIdx = daysOfWeekIndices[slot.endDay];
-          const startMinutes = parseInt(slot.startTime.split(':')[0]) * 60 + parseInt(slot.startTime.split(':')[1]);
-          let endMinutes = parseInt(slot.endTime.split(':')[0]) * 60 + parseInt(slot.endTime.split(':')[1]);
-          const adjustedEndMinutes = endDayIdx < startDayIdx || (endDayIdx === startDayIdx && endMinutes <= startMinutes) ? endMinutes + 24 * 60 : endMinutes;
-          const hours = (adjustedEndMinutes - startMinutes) / 60;
-          return daySum + hours;
-        }, 0);
-      }, 0);
-      if (totalHours < 10) {
-        console.log('Validation failed: Total hours less than 10');
-        return res.status(400).json({ message: 'You must provide at least 10 hours of availability.' });
-      }
     }
 
     if (note && typeof note === 'string') {
@@ -782,6 +822,7 @@ router.put('/:id', verifyUser, async (req, res) => {
       updateFields.isRecurring = isRecurring;
     }
 
+    console.log('Updating availability with fields:', JSON.stringify(updateFields, null, 2));
     const updatedAvailability = await Availability.findByIdAndUpdate(
       id,
       { $set: updateFields },
@@ -804,6 +845,7 @@ router.put('/:id', verifyUser, async (req, res) => {
     });
 
     console.log('Availability update successful:', updatedAvailability._id);
+    console.log('Updated availability data:', JSON.stringify(updatedAvailability.toObject(), null, 2));
     return res.status(200).json({
       message: 'Availability updated successfully.',
       data: updatedAvailability,

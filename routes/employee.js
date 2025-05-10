@@ -3,9 +3,12 @@ import multer from "multer";
 import mongoose from "mongoose";
 import path from "path";
 import bcrypt from "bcrypt";
+import nodemailer from "nodemailer";
+import crypto from "crypto";
 import Employee from "../models/Employee.js";
 import User from "../models/User.js";
 import Department from "../models/Department.js";
+import Company from "../models/Company.js";
 import { verifyUser } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
@@ -20,6 +23,15 @@ const storage = multer.diskStorage({
   },
 });
 const upload = multer({ storage });
+
+// Reusing the existing nodemailer setup
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
 
 /**
  * @route   POST /api/employee/add
@@ -39,7 +51,7 @@ router.post("/add", verifyUser, upload.single("image"), async (req, res) => {
       password,
     } = req.body;
 
-    // Validate required fields
+    // Validate required fields (password is optional since we'll use a reset link)
     if (
       !fullName ||
       !email ||
@@ -48,12 +60,11 @@ router.post("/add", verifyUser, upload.single("image"), async (req, res) => {
       !gender ||
       !maritalStatus ||
       !designation ||
-      !department ||
-      !password
+      !department
     ) {
       return res.status(400).json({
         success: false,
-        error: "All fields are required.",
+        error: "All fields are required except password.",
       });
     }
 
@@ -122,8 +133,19 @@ router.post("/add", verifyUser, upload.single("image"), async (req, res) => {
       });
     }
 
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
+    // Fetch company name for the email
+    const company = await Company.findById(req.user.companyId);
+    if (!company) {
+      return res.status(400).json({
+        success: false,
+        error: "Company not found.",
+      });
+    }
+    const companyName = company.companyName || "Our Company";
+
+    // Generate a temporary password (optional, can be removed if not needed)
+    const temporaryPassword = password || crypto.randomBytes(8).toString("hex");
+    const hashedPassword = await bcrypt.hash(temporaryPassword, 10);
 
     // Create new user
     const newUser = new User({
@@ -133,6 +155,11 @@ router.post("/add", verifyUser, upload.single("image"), async (req, res) => {
       role: "Employee",
       companyId: req.user.companyId,
     });
+
+    // Generate reset password token
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    newUser.resetPasswordToken = resetToken;
+    newUser.resetPasswordExpires = Date.now() + 3600000; // 1 hour expiry
     const savedUser = await newUser.save();
 
     try {
@@ -152,9 +179,32 @@ router.post("/add", verifyUser, upload.single("image"), async (req, res) => {
       });
       await newEmployee.save();
 
+      // Send welcome email with reset password link
+      const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
+      const mailOptions = {
+        from: process.env.EMAIL_USER,
+        to: email,
+        subject: "Welcome to Emrs!",
+        html: `
+          <h2>Welcome to Emrs, ${fullName}!</h2>
+          <p>You have been assigned as an employee in ${companyName}.</p>
+          <p>Please set up your password by clicking the link below:</p>
+          <p><a href="${resetUrl}">Set Up Your Password</a></p>
+          <p>This link will expire in 1 hour. If you did not request this, please ignore this email.</p>
+          <p>Best regards,<br/>The Emrs Team</p>
+        `,
+      };
+      try {
+        await transporter.sendMail(mailOptions);
+        console.log(`Welcome email with reset link sent to ${email}`);
+      } catch (emailError) {
+        console.error("Error sending welcome email:", emailError.message);
+        // Note: We don't fail the request if the email fails to send
+      }
+
       return res.status(201).json({
         success: true,
-        message: "Employee added successfully!",
+        message: "Employee added successfully! A welcome email with a password setup link has been sent to the employee.",
       });
     } catch (error) {
       // Cleanup: Delete the user if employee creation fails
@@ -453,7 +503,7 @@ router.put("/:id", verifyUser, upload.single("image"), async (req, res) => {
     if (!deptExists) {
       return res.status(400).json({
         success: false,
-        error: "Department does not exist.",
+        error: "Department does exist.",
       });
     }
 

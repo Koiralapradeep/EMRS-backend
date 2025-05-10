@@ -21,6 +21,11 @@ const notificationSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    leaveId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Leave", // Reference to the Leave model
+      required: false, // Not all notifications will be related to a leave request
+    },
     isRead: {
       type: Boolean,
       default: false,

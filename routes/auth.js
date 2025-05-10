@@ -143,30 +143,36 @@ router.get("/user", verifyUser, async (req, res) => {
 });
 
 // Logout (`/api/auth/logout`)
-router.post("/logout", verifyUser, (req, res) => {
+router.post("/logout", (req, res) => {
   console.log("DEBUG - Incoming request: POST /api/auth/logout");
-  console.log("Logout request received for user:", req.user.email, "Role:", req.user.role);
+  console.log("DEBUG - Session before logout:", req.session);
 
   if (!req.session) {
-    console.log("No session found to destroy for user:", req.user.email);
-    return res.status(200).json({ message: "No session to log out" });
-  }
-
-  req.session.destroy((err) => {
-    if (err) {
-      console.error("Error destroying session for user:", req.user.email, err);
-      return res.status(500).json({ message: "Failed to log out" });
-    }
-
+    console.log("DEBUG - No session found to destroy");
     res.clearCookie("connect.sid", {
       path: "/",
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
     });
+    return res.status(200).json({ success: true, message: "Logged out successfully (no session)" });
+  }
 
-    console.log("Session destroyed successfully for user:", req.user.email, "Role:", req.user.role);
-    return res.status(200).json({ message: "Logged out successfully" });
+  req.session.destroy((err) => {
+    if (err) {
+      console.error("Error destroying session:", err.message);
+      return res.status(500).json({ success: false, message: "Failed to log out" });
+    }
+
+    console.log("DEBUG - Session after logout:", req.session);
+    res.clearCookie("connect.sid", {
+      path: "/",
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+    });
+    console.log("DEBUG - Cleared connect.sid cookie on backend");
+    res.status(200).json({ success: true, message: "Logged out successfully" });
   });
 });
 
