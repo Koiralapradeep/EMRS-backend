@@ -1,38 +1,57 @@
 import Notification from "../models/Notifications.js";
 import User from "../models/User.js";
 
-const createNotification = async (io, { recipientId, senderId, type, leaveDetails }) => {
+const createNotification = async (io, { recipientId, senderId, type, leaveDetails, messageDetails, message }) => {
   try {
-    const sender = await User.findById(senderId); // Fetch sender details
-    const recipient = await User.findById(recipientId); // Fetch recipient details
+    const sender = await User.findById(senderId);
+    const recipient = await User.findById(recipientId);
 
-    let message;
+    let notificationMessage;
     switch (type) {
       case "leave_request":
-        message = `${sender?.name || "An employee"} has submitted a leave request for ${leaveDetails?.startDate} to ${leaveDetails?.endDate}.`;
+        notificationMessage = `${sender?.name || "An employee"} has submitted a leave request for ${leaveDetails?.startDate} to ${leaveDetails?.endDate}.`;
         break;
       case "leave_approved":
-        message = `Your leave request for ${leaveDetails?.startDate} to ${leaveDetails?.endDate} has been approved by ${sender?.name || "your manager"}.`;
+        notificationMessage = `Your leave request for ${leaveDetails?.startDate} to ${leaveDetails?.endDate} has been approved by ${sender?.name || "your manager"}.`;
         break;
       case "leave_rejected":
-        message = `Your leave request for ${leaveDetails?.startDate} to ${leaveDetails?.endDate} has been rejected by ${sender?.name || "your manager"}.`;
+        notificationMessage = `Your leave request for ${leaveDetails?.startDate} to ${leaveDetails?.endDate} has been rejected by ${sender?.name || "your manager"}.`;
+        break;
+      case "new_message":
+        notificationMessage = `You have a new message from ${sender?.name || "a colleague"}.`;
         break;
       default:
-        message = "You have a new notification.";
+        notificationMessage = "You have a new notification.";
     }
 
     const notification = new Notification({
       recipient: recipientId,
       sender: senderId,
       type,
-      message,
+      message: notificationMessage,
       isRead: false,
+      conversationId: messageDetails?.conversationId,
+      messageDetails: type === "new_message" ? messageDetails : undefined,
+      message: type === "new_message" ? message : undefined,
+    });
+
+    console.log("DEBUG - Creating notification:", {
+      recipientId,
+      senderId,
+      type,
+      notificationMessage,
+      conversationId: messageDetails?.conversationId,
+      messageDetails,
+      message,
     });
 
     await notification.save();
 
-    // Emit the notification via Socket.IO to the recipient
+    console.log("DEBUG - Notification saved:", notification.toObject());
+
     io.to(recipientId.toString()).emit("notification", notification);
+
+    console.log("DEBUG - Emitted notification event to:", recipientId);
 
     return notification;
   } catch (error) {

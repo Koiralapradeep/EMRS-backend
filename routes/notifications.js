@@ -13,8 +13,11 @@ router.get("/", verifyUser, async (req, res) => {
     }
 
     const notifications = await Notification.find({ recipient: req.user._id })
+      .populate("sender", "name") // Populate sender to include name
       .sort({ createdAt: -1 })
       .lean();
+
+    console.log("DEBUG - Fetched notifications for user:", req.user._id, notifications);
 
     return res.status(200).json({
       success: true,
@@ -26,7 +29,6 @@ router.get("/", verifyUser, async (req, res) => {
   }
 });
 
-// Mark a notification as read (update isRead field)
 // Mark a notification as read (update isRead field)
 router.put("/:id/mark-as-read", verifyUser, async (req, res) => {
   try {
@@ -53,7 +55,7 @@ router.put("/:id/mark-as-read", verifyUser, async (req, res) => {
     notification.isRead = true;
     await notification.save();
 
-    console.log("Notification marked as read:", notification);
+    console.log("DEBUG - Notification marked as read:", notification.toObject());
 
     return res.status(200).json({ success: true, message: "Notification marked as read." });
   } catch (error) {

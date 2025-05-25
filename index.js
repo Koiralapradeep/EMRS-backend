@@ -3,7 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import session from "express-session";
-import MongoStore from "connect-mongo"; // Add this import
+import MongoStore from "connect-mongo";
 import connectDB from "./db/DB.js";
 import authRoutes from "./routes/auth.js";
 import googleAuth from "./routes/googleAuth.js";
@@ -24,6 +24,7 @@ import holiday from "./routes/holidays.js";
 import User from './models/User.js';
 import shiftswap from "./routes/shiftswap.js";
 import admin from "./routes/admin.js";
+import messages from './routes/message.js';
 
 // Load environment variables first
 dotenv.config({ path: './.env' });
@@ -58,6 +59,9 @@ const io = new Server(server, {
     credentials: true,
   },
 });
+
+// Make io available for routes
+app.set('io', io);
 
 // WebSocket user map and connection handling
 const users = new Map();
@@ -175,6 +179,7 @@ app.use("/api/holidays", holiday);
 app.use('/api/users', User);
 app.use('/api/shift-swap', shiftswap);
 app.use('/api/admin', admin);
+app.use('/api/messages', messages);
 app.get("/", (req, res) => {
   res.send("Backend server is running!");
 });

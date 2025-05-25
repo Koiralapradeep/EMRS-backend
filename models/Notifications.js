@@ -14,7 +14,7 @@ const notificationSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ["leave_request", "leave_approved", "leave_rejected"],
+      enum: ["leave_request", "leave_approved", "leave_rejected", "new_message"],
       required: true,
     },
     message: {
@@ -23,12 +23,25 @@ const notificationSchema = new mongoose.Schema(
     },
     leaveId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Leave", // Reference to the Leave model
-      required: false, // Not all notifications will be related to a leave request
+      ref: "Leave",
+      required: false,
+    },
+    conversationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Conversation",
+      required: false,
     },
     isRead: {
       type: Boolean,
       default: false,
+    },
+    messageDetails: {
+      type: Object, // Store message details like conversationId, senderName
+      required: false,
+    },
+    message: {
+      type: Object, // Store the actual message object
+      required: false,
     },
   },
   { timestamps: true }

@@ -10,7 +10,8 @@ import ShiftSchedule from '../models/ShiftSchedule.js';
 import Department from '../models/Department.js';
 import Employee from '../models/Employee.js';
 import nodemailer from 'nodemailer';
-
+import { AvailabilityMatcher } from '../Util/AvailabilityMatcher.js';
+import { SchedulingOptimizer, SchedulingCoordinator } from '../Util/SchedulingOptimizer.js';
 dayjs.extend(utc);
 
 // Nodemailer setup
@@ -99,6 +100,268 @@ const checkForOverlappingShifts = async (employeeId, weekStartDate, day, startTi
     }
   }
   return false; // No overlap or duplicate
+};
+
+// Enhanced scheduling algorithm that works for ANY scenario
+const generateUniversalSchedule = async (companyId, departmentId, startDate, shiftRequirements, availabilities) => {
+  const shifts = [];
+  const employeeHours = {};
+  const employeeAssignments = {};
+  const daysOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  
+  console.log('=== Starting Universal Scheduling ===');
+  console.log(`Processing ${availabilities.length} employees for ${shiftRequirements.length} shift requirement sets`);
+
+  // Helper function to convert time to minutes
+  const timeToMinutes = (timeStr) => {
+    const [hours, minutes] = timeStr.split(':').map(Number);
+    return hours * 60 + minutes;
+  };
+
+  // Helper function to convert minutes to time
+  const minutesToTime = (minutes) => {
+    const hours = Math.floor(minutes / 60) % 24;
+    const mins = minutes % 60;
+    return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
+  };
+
+  // Process each day independently
+  for (let dayIndex = 0; dayIndex < daysOfWeek.length; dayIndex++) {
+    const day = daysOfWeek[dayIndex];
+    console.log(`\n=== Processing ${day.toUpperCase()} ===`);
+
+    // Reset daily assignments to prevent double-booking on same day
+    const dailyAssignedEmployees = new Set();
+
+    // Get all shift requirements for this day
+    const dayRequirements = [];
+    for (const requirement of shiftRequirements) {
+      const daySlots = requirement[day] || [];
+      daySlots.forEach(slot => {
+        dayRequirements.push({
+          ...slot,
+          departmentId: requirement.departmentId,
+          day: day
+        });
+      });
+    }
+
+    if (dayRequirements.length === 0) {
+      console.log(`No shift requirements for ${day}`);
+      continue;
+    }
+
+    // Sort requirements by start time to process in chronological order
+    dayRequirements.sort((a, b) => timeToMinutes(a.startTime) - timeToMinutes(b.startTime));
+
+    console.log(`Found ${dayRequirements.length} shift requirements for ${day}:`);
+    dayRequirements.forEach((req, i) => {
+      console.log(`  ${i + 1}. ${req.startTime}-${req.endTime} (${req.minEmployees} employees needed)`);
+    });
+
+    // Process each shift requirement
+    for (let reqIndex = 0; reqIndex < dayRequirements.length; reqIndex++) {
+      const shiftReq = dayRequirements[reqIndex];
+      console.log(`\nProcessing shift ${reqIndex + 1}: ${shiftReq.startTime}-${shiftReq.endTime}`);
+
+      const reqStartMinutes = timeToMinutes(shiftReq.startTime);
+      let reqEndMinutes = timeToMinutes(shiftReq.endTime);
+      
+      // Handle overnight shifts (end time before start time)
+      if (reqEndMinutes <= reqStartMinutes) {
+        reqEndMinutes += 24 * 60; // Add 24 hours
+      }
+
+      const shiftDurationMinutes = reqEndMinutes - reqStartMinutes;
+      const shiftDurationHours = shiftDurationMinutes / 60;
+
+      console.log(`Shift details: ${shiftDurationHours} hours (${reqStartMinutes}-${reqEndMinutes} minutes)`);
+
+      // Find ALL employees available for this specific shift
+      const availableEmployees = [];
+
+      for (const avail of availabilities) {
+        const employeeId = avail.employeeId._id.toString();
+        
+        // Skip if employee already assigned today
+        if (dailyAssignedEmployees.has(employeeId)) {
+          console.log(`Skipping ${avail.employeeId.name}: already assigned today`);
+          continue;
+        }
+
+        const dayAvailability = avail.days[day];
+        if (!dayAvailability || !dayAvailability.available) {
+          console.log(`Skipping ${avail.employeeId.name}: not available on ${day}`);
+          continue;
+        }
+
+        console.log(`Checking ${avail.employeeId.name} for ${day}`);
+
+        // Check each availability slot for this employee
+        for (const availSlot of dayAvailability.slots) {
+          const availStartMinutes = timeToMinutes(availSlot.startTime);
+          let availEndMinutes = timeToMinutes(availSlot.endTime);
+          
+          // Handle overnight availability
+          if (availEndMinutes <= availStartMinutes) {
+            availEndMinutes += 24 * 60;
+          }
+
+          console.log(`  Availability slot: ${availSlot.startTime}-${availSlot.endTime} (${availStartMinutes}-${availEndMinutes})`);
+
+          // Calculate overlap between requirement and availability
+          const overlapStart = Math.max(reqStartMinutes, availStartMinutes);
+          const overlapEnd = Math.min(reqEndMinutes, availEndMinutes);
+
+          if (overlapStart < overlapEnd) {
+            const overlapMinutes = overlapEnd - overlapStart;
+            const overlapHours = overlapMinutes / 60;
+            const coveragePercentage = (overlapMinutes / shiftDurationMinutes) * 100;
+
+            console.log(`    Overlap: ${overlapMinutes} minutes (${coveragePercentage.toFixed(1)}% coverage)`);
+
+            // Accept any meaningful overlap (even partial coverage)
+            if (overlapMinutes >= 30) { // At least 30 minutes
+              const currentHours = employeeHours[employeeId] || 0;
+              
+              availableEmployees.push({
+                employeeId,
+                employee: avail.employeeId,
+                overlapStart,
+                overlapEnd,
+                overlapMinutes,
+                overlapHours,
+                coveragePercentage,
+                currentHours,
+                preference: availSlot.preference || 0,
+                actualStartTime: minutesToTime(overlapStart),
+                actualEndTime: minutesToTime(overlapEnd % (24 * 60)),
+                durationHours: overlapHours,
+                isExactMatch: coveragePercentage >= 95
+              });
+
+              console.log(`    Added candidate: ${avail.employeeId.name} ${minutesToTime(overlapStart)}-${minutesToTime(overlapEnd % (24 * 60))} (${overlapHours.toFixed(2)}h)`);
+            } else {
+              console.log(`    Overlap too small: ${overlapMinutes} minutes`);
+            }
+          } else {
+            console.log(`    No overlap: req(${reqStartMinutes}-${reqEndMinutes}) vs avail(${availStartMinutes}-${availEndMinutes})`);
+          }
+        }
+      }
+
+      console.log(`Found ${availableEmployees.length} available employees for this shift`);
+
+      if (availableEmployees.length === 0) {
+        console.warn(`No employees available for ${day} ${shiftReq.startTime}-${shiftReq.endTime}`);
+        continue;
+      }
+
+      // Sort employees by priority:
+      // 1. Exact matches first (95%+ coverage)
+      // 2. Higher coverage percentage
+      // 3. Lower current hours (fairness)
+      // 4. Higher preference
+      availableEmployees.sort((a, b) => {
+        // Exact matches get highest priority
+        if (a.isExactMatch && !b.isExactMatch) return -1;
+        if (!a.isExactMatch && b.isExactMatch) return 1;
+        
+        // Then by coverage percentage
+        const coverageDiff = b.coveragePercentage - a.coveragePercentage;
+        if (Math.abs(coverageDiff) > 5) return coverageDiff;
+        
+        // Then by fairness (fewer hours is better)
+        const hoursDiff = a.currentHours - b.currentHours;
+        if (Math.abs(hoursDiff) > 1) return hoursDiff;
+        
+        // Finally by preference
+        return b.preference - a.preference;
+      });
+
+      console.log('Ranked candidates:');
+      availableEmployees.slice(0, 5).forEach((emp, i) => {
+        console.log(`  ${i + 1}. ${emp.employee.name}: ${emp.actualStartTime}-${emp.actualEndTime} (${emp.coveragePercentage.toFixed(1)}%, ${emp.currentHours}h current)`);
+      });
+
+      // Assign employees to this shift
+      const assignmentsNeeded = shiftReq.minEmployees;
+      const assignments = [];
+
+      // Strategy 1: If we have exact matches, use them first
+      const exactMatches = availableEmployees.filter(emp => emp.isExactMatch);
+      if (exactMatches.length > 0) {
+        console.log(`Using ${Math.min(assignmentsNeeded, exactMatches.length)} exact matches`);
+        for (let i = 0; i < Math.min(assignmentsNeeded, exactMatches.length); i++) {
+          assignments.push(exactMatches[i]);
+        }
+      } else {
+        // Strategy 2: Use best available employees up to the required number
+        console.log(`No exact matches, using top ${Math.min(assignmentsNeeded, availableEmployees.length)} candidates`);
+        for (let i = 0; i < Math.min(assignmentsNeeded, availableEmployees.length); i++) {
+          assignments.push(availableEmployees[i]);
+        }
+      }
+
+      // Create and save shift records
+      for (const assignment of assignments) {
+        const employeeIdStr = assignment.employeeId;
+        
+        const shift = new ShiftSchedule({
+          employeeId: assignment.employeeId,
+          companyId,
+          departmentId: shiftReq.departmentId,
+          weekStartDate: startDate,
+          day,
+          startTime: assignment.actualStartTime,
+          endTime: assignment.actualEndTime,
+          durationHours: assignment荣誉Hours
+        });
+
+        console.log(`Creating shift: ${assignment.employee.name} ${assignment.actualStartTime}-${assignment.actualEndTime} (${assignment.durationHours.toFixed(2)}h)`);
+        
+        try {
+          await shift.save();
+          shifts.push(shift);
+
+          // Update tracking
+          employeeHours[employeeIdStr] = (employeeHours[employeeIdStr] || 0) + assignment.durationHours;
+          dailyAssignedEmployees.add(employeeIdStr);
+
+          if (!employeeAssignments[employeeIdStr]) {
+            employeeAssignments[employeeIdStr] = {
+              employee: assignment.employee,
+              shifts: []
+            };
+          }
+          employeeAssignments[employeeIdStr].shifts.push(shift);
+
+          console.log(`✓ Saved shift for ${assignment.employee.name}`);
+        } catch (error) {
+          console.error(`Failed to save shift for ${assignment.employee.name}:`, error);
+        }
+      }
+
+      console.log(`Assigned ${assignments.length}/${assignmentsNeeded} employees to this shift`);
+    }
+  }
+
+  console.log('\n=== Scheduling Summary ===');
+  console.log(`Total shifts created: ${shifts.length}`);
+  console.log(`Employees with assignments: ${Object.keys(employeeAssignments).length}`);
+  
+  // Log employee hour distribution
+  console.log('\nEmployee Hours:');
+  Object.entries(employeeHours).forEach(([empId, hours]) => {
+    const empName = employeeAssignments[empId]?.employee?.name || 'Unknown';
+    console.log(`  ${empName}: ${hours.toFixed(2)} hours`);
+  });
+
+  return {
+    shifts,
+    employeeHours,
+    employeeAssignments
+  };
 };
 
 const router = express.Router();
@@ -1888,668 +2151,559 @@ router.get('/shift-requirements/:companyId', verifyUser, authorizeRoles(['Manage
 });
 
 //auto-schedule:
+// Complete Integration - Enhanced Auto-Schedule System
+//auto-schedule:
 router.post('/auto-schedule/:companyId', verifyUser, authorizeRoles(['Manager']), async (req, res) => {
   try {
     const { companyId } = req.params;
     const { startDate, endDate, departmentId } = req.body;
-    console.log('Auto-schedule request received:', { companyId, startDate, endDate, departmentId });
+    
+    console.log('Auto-schedule request:', { companyId, startDate, endDate, departmentId });
 
-    // Validate inputs
+    // Basic validation
     if (!companyId || !mongoose.Types.ObjectId.isValid(companyId)) {
-      console.log('Validation failed: Invalid companyId');
-      return res.status(400).json({ message: 'Invalid companyId. Must be a valid ObjectId.' });
+      return res.status(400).json({ message: 'Invalid companyId.' });
     }
-
-    if (!startDate || !dayjs.utc(startDate, 'YYYY-MM-DD').isValid()) {
-      console.log('Validation failed: Invalid startDate');
-      return res.status(400).json({ message: 'Invalid startDate. Must be in YYYY-MM-DD format.' });
-    }
-
-    if (!endDate || !dayjs.utc(endDate, 'YYYY-MM-DD').isValid()) {
-      console.log('Validation failed: Invalid endDate');
-      return res.status(400).json({ message: 'Invalid endDate. Must be in YYYY-MM-DD format.' });
+    if (!departmentId || !mongoose.Types.ObjectId.isValid(departmentId)) {
+      return res.status(400).json({ message: 'Invalid departmentId.' });
     }
 
     const start = dayjs.utc(startDate).startOf('day');
     const end = dayjs.utc(endDate).startOf('day');
-    if (start.isAfter(end)) {
-      console.log('Validation failed: Invalid date range');
-      return res.status(400).json({ message: 'startDate must be before or equal to endDate.' });
-    }
 
-    if (start.day() !== 0) {
-      console.log('Validation failed: startDate must be a Sunday');
-      return res.status(400).json({ message: 'startDate must be a Sunday.' });
-    }
-
-    if (end.day() !== 6) {
-      console.log('Validation failed: endDate must be a Saturday');
-      return res.status(400).json({ message: 'endDate must be a Saturday.' });
-    }
-
-    const diffDays = end.diff(start, 'day');
-    if (diffDays !== 6) {
-      console.log('Validation failed: Date range must be exactly one week');
-      return res.status(400).json({ message: 'Date range must be exactly one week (from Sunday to Saturday).' });
+    if (start.day() !== 0 || end.day() !== 6 || end.diff(start, 'day') !== 6) {
+      return res.status(400).json({ message: 'Date range must be from Sunday to Saturday.' });
     }
 
     // Add validation for startDate to prevent scheduling before the current week
     const today = dayjs().utc();
-    const currentWeekStart = today.subtract(today.day(), 'day'); // Sunday of the current week (e.g., May 4)
+    const currentWeekStart = today.subtract(today.day(), 'day');
     if (start.isBefore(currentWeekStart, 'day')) {
-      console.log('Validation failed: Cannot schedule before the current week');
-      return res.status(400).json({ message: 'Cannot generate a schedule for weeks before the current week.' });
+      return res.status(400).json({ message: 'Cannot generate schedule for past weeks.' });
     }
 
-    if (!departmentId || !mongoose.Types.ObjectId.isValid(departmentId)) {
-      console.log('Validation failed: Invalid departmentId');
-      return res.status(400).json({ message: 'Invalid departmentId. Must be a valid ObjectId.' });
-    }
-
-    // Verify department belongs to the company
-    console.log('Fetching department with query:', { _id: departmentId, companyId });
+    // Check department exists
     const department = await Department.findOne({ _id: departmentId, companyId }).lean();
     if (!department) {
-      console.log('Validation failed: Department does not belong to the company');
-      return res.status(400).json({ message: 'Department does not belong to the company.' });
+      return res.status(400).json({ message: 'Department not found.' });
     }
-    console.log('Department found:', department);
 
-    // Fetch existing shifts to prevent overlaps and duplicates
-    const existingShiftsQuery = {
+    // Check for existing shifts
+    const existingShifts = await ShiftSchedule.find({
       companyId,
       weekStartDate: start.toDate(),
       departmentId,
-    };
-    console.log('Fetching existing shifts with query:', existingShiftsQuery);
-    const existingShifts = await ShiftSchedule.find(existingShiftsQuery).lean();
-    console.log('Existing shifts for the week:', JSON.stringify(existingShifts, null, 2));
+    }).lean();
 
-    // Fetch availabilities with retry mechanism
-    const availabilityQuery = {
+    if (existingShifts.length > 0) {
+      return res.status(400).json({ 
+        message: 'Schedule already exists. Delete existing shifts first.',
+        existingShiftsCount: existingShifts.length
+      });
+    }
+
+    // Get shift requirements
+    const shiftRequirements = await ShiftRequirement.find({ companyId, departmentId }).lean();
+    if (!shiftRequirements || shiftRequirements.length === 0) {
+      return res.status(400).json({ message: 'No shift requirements found.' });
+    }
+
+    // Validate shift requirements have actual slots
+    const hasValidSlots = shiftRequirements.some(req => 
+      ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+        .some(day => req[day] && req[day].length > 0)
+    );
+
+    if (!hasValidSlots) {
+      return res.status(400).json({ message: 'No time slots defined in shift requirements.' });
+    }
+
+    // Get availabilities
+    let availabilities = await Availability.find({
       companyId,
       weekStartDate: start.toDate(),
-    };
-    console.log('Fetching availabilities with query:', availabilityQuery);
-
-    let allAvailabilities;
-    let retries = 5;
-    while (retries > 0) {
-      allAvailabilities = await Availability.find(availabilityQuery)
-        .populate({
-          path: 'employeeId',
-          select: 'name email role',
-        })
-        .lean();
-      if (allAvailabilities.length > 0) break;
-      console.log('No availabilities found, retrying...');
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      retries--;
-    }
-
-    if (!allAvailabilities || allAvailabilities.length === 0) {
-      console.log('No availabilities found after retries');
-      return res.status(400).json({ message: 'No availabilities found for the specified week.' });
-    }
-    console.log('All availabilities for company and week:', JSON.stringify(allAvailabilities, null, 2));
-
-    // Manually fetch department information for each availability
-    for (let avail of allAvailabilities) {
-      if (!avail.employeeId) {
-        console.warn(`Population failed for availability ${avail._id}, fetching employee manually`);
-        const employee = await User.findById(avail.employeeId).select('name email role').lean();
-        if (employee) {
-          avail.employeeId = employee;
-        } else {
-          console.warn(`Employee ${avail.employeeId} not found in users collection`);
-          continue;
-        }
-      }
-
-      if (avail.employeeId && avail.employeeId._id) {
-        console.log(`Fetching employee details for user ${avail.employeeId._id}`);
-        const employeeDetails = await Employee.findOne({ userId: avail.employeeId._id }).select('department').lean();
-        if (employeeDetails && employeeDetails.department) {
-          avail.employeeId.departmentId = employeeDetails.department;
-        } else {
-          console.warn(`No employee details found in employees collection for user ${avail.employeeId._id}. Attempting to fetch from User collection.`);
-          const user = await User.findById(avail.employeeId._id).select('departmentId').lean();
-          avail.employeeId.departmentId = user?.departmentId || null;
-        }
-      } else {
-        console.warn(`Skipping department fetch for availability ${avail._id}: employeeId is invalid`);
-        avail.employeeId.departmentId = null;
-      }
-      console.log(`Availability ${avail._id} for employee ${avail.employeeId?.email}:`, {
-        employeeId: avail.employeeId?._id?.toString(),
-        departmentId: avail.employeeId?.departmentId?.toString(),
-        days: avail.days,
-      });
-    }
-
-    // Filter out invalid availabilities
-    allAvailabilities = allAvailabilities.filter((avail) => {
-      const isValid = avail.employeeId && avail.employeeId._id;
-      console.log(`Filtering availability ${avail._id}: Is valid? ${isValid}`);
-      return isValid;
-    });
-    console.log('Availabilities after filtering invalid entries:', JSON.stringify(allAvailabilities, null, 2));
-
-    let availabilities = allAvailabilities.filter((avail) => {
-      if (!avail.employeeId.departmentId) {
-        console.warn(`Employee ${avail.employeeId?.email} has no departmentId. Excluding from scheduling.`);
-        return false;
-      }
-      const matches = avail.employeeId.departmentId.toString() === departmentId.toString();
-      console.log('Filtering availability by department for employee:', {
-        employeeEmail: avail.employeeId?.email,
-        employeeDepartmentId: avail.employeeId?.departmentId?.toString(),
-        requestedDepartmentId: departmentId.toString(),
-        matches,
-      });
-      return matches;
-    });
+    }).populate({
+      path: 'employeeId',
+      select: 'name email role',
+    }).lean();
 
     if (!availabilities || availabilities.length === 0) {
-      console.log('No availabilities found after department filtering');
-      return res.status(400).json({ message: 'No availabilities found for the specified department. Ensure employees are assigned to the correct department.' });
+      return res.status(400).json({ message: 'No employee availabilities found.' });
     }
 
-    // Fetch shift requirements
-    const shiftRequirementsQuery = { companyId, departmentId };
-    console.log('Fetching shift requirements with query:', shiftRequirementsQuery);
-    const shiftRequirements = await ShiftRequirement.find(shiftRequirementsQuery).lean();
-    console.log('Fetched shift requirements:', JSON.stringify(shiftRequirements, null, 2));
-    if (!shiftRequirements || shiftRequirements.length === 0) {
-      console.log('No shift requirements found');
-      return res.status(400).json({ message: 'No shift requirements defined for the department.' });
+    // Filter by department
+    const validAvailabilities = [];
+    for (const avail of availabilities) {
+      if (avail.employeeId && avail.employeeId._id) {
+        const employeeDetails = await Employee.findOne({ userId: avail.employeeId._id }).select('department').lean();
+        if (employeeDetails && employeeDetails.department && employeeDetails.department.toString() === departmentId.toString()) {
+          avail.employeeId.departmentId = employeeDetails.department;
+          validAvailabilities.push(avail);
+        }
+      }
     }
 
-    // Fetch department for naming in conflicts
-    const departmentName = department.departmentName || 'Unknown';
-    console.log('Department name for conflicts:', departmentName);
+    if (validAvailabilities.length === 0) {
+      return res.status(400).json({ message: 'No employees from this department have submitted availability.' });
+    }
 
-    // Scheduling logic with improved overlap handling
+    console.log(`Processing ${validAvailabilities.length} employees`);
+
+    // Enhanced scheduling algorithm
     const shifts = [];
-    const daysOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-    const fairnessMetricsByDept = {};
-    const employeeShifts = {};
-    const employeeAssignments = {};
     const employeeHours = {};
+    const employeeAssignments = {};
+    const daysOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
-    const daysOfWeekIndices = daysOfWeek.reduce((acc, d, idx) => {
-      acc[d] = idx;
-      return acc;
-    }, {});
-    console.log('Days of week indices:', daysOfWeekIndices);
+    // Helper functions
+    const timeToMinutes = (timeStr) => {
+      const [hours, minutes] = timeStr.split(':').map(Number);
+      return hours * 60 + minutes;
+    };
 
-    // Track employees assigned per day to prevent multiple shifts on the same day
-    const employeesAssignedPerDay = {};
+    const minutesToTime = (minutes) => {
+      const hours = Math.floor(minutes / 60) % 24;
+      const mins = minutes % 60;
+      return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
+    };
 
-    for (const requirement of shiftRequirements) {
-      const deptId = requirement.departmentId.toString();
-      fairnessMetricsByDept[deptId] = { totalHours: 0, shiftsAssigned: 0, employeesAssigned: new Set() };
+    // Process each day
+    for (let dayIndex = 0; dayIndex < daysOfWeek.length; dayIndex++) {
+      const day = daysOfWeek[dayIndex];
+      console.log(`\n=== Processing ${day.toUpperCase()} ===`);
 
-      for (let i = 0; i < daysOfWeek.length; i++) {
-        const day = daysOfWeek[i];
-        let slots = requirement[day];
-        if (!slots || slots.length === 0) {
-          console.log(`No slots defined for ${day}`);
-          continue;
-        }
+      // Track employee assignments for this day (but allow multiple shifts)
+      const employeeShiftTimes = {}; // Track specific time slots to prevent exact duplicates
 
-        // Initialize tracking for this day
-        if (!employeesAssignedPerDay[day]) {
-          employeesAssignedPerDay[day] = new Set();
-        }
-
-        // Preprocess shift requirement slots
-        slots = slots.map(slot => {
-          const slotStartDayIdx = daysOfWeekIndices[slot.startDay.toLowerCase()];
-          const slotEndDayIdx = daysOfWeekIndices[slot.endDay.toLowerCase()];
-          const slotStartMinutes = parseInt(slot.startTime.split(':')[0]) * 60 + parseInt(slot.startTime.split(':')[1]);
-          let slotEndMinutes = parseInt(slot.endTime.split(':')[0]) * 60 + parseInt(slot.endTime.split(':')[1]);
-          let adjustedSlotEndMinutes = slotEndMinutes;
-          let daySpan = 0;
-
-          if (slotEndDayIdx < slotStartDayIdx) {
-            daySpan = 7 - slotStartDayIdx + slotEndDayIdx;
-            adjustedSlotEndMinutes += daySpan * 24 * 60;
-          } else if (slotEndDayIdx === slotStartDayIdx && slotEndMinutes <= slotStartMinutes) {
-            daySpan = 1;
-            adjustedSlotEndMinutes += 24 * 60;
-          } else {
-            daySpan = slotEndDayIdx - slotStartDayIdx;
-            if (slotEndMinutes <= slotStartMinutes) {
-              adjustedSlotEndMinutes += 24 * 60;
-              daySpan += 1;
-            }
-          }
-
-          const durationMinutes = adjustedSlotEndMinutes - slotStartMinutes;
-          const duration = durationMinutes / 60;
-
-          // Normalize shiftType based on time range
-          let normalizedShiftType = slot.shiftType ? slot.shiftType.toLowerCase() : null;
-          const startHour = parseInt(slot.startTime.split(':')[0]);
-          const inferredShiftType = startHour >= 18 || startHour < 6 ? 'night' : 'day';
-          if (!normalizedShiftType) {
-            normalizedShiftType = inferredShiftType;
-            console.log(`Inferred shiftType for slot ${slot.startTime}-${slot.endTime} on ${day}: ${normalizedShiftType}`);
-          } else if (normalizedShiftType !== inferredShiftType) {
-            console.warn(`Shift type mismatch with time range for slot ${slot.startTime}-${slot.endTime} on ${day}:`, {
-              databaseShiftType: slot.shiftType,
-              inferredShiftType,
-            });
-            normalizedShiftType = inferredShiftType; // Prioritize inferred shift type based on time
-          }
-
-          return {
+      // Get shift requirements for this day
+      const dayRequirements = [];
+      for (const requirement of shiftRequirements) {
+        const daySlots = requirement[day] || [];
+        daySlots.forEach(slot => {
+          dayRequirements.push({
             ...slot,
-            shiftType: normalizedShiftType,
-            slotStartDayIdx,
-            slotEndDayIdx,
-            slotStartMinutes,
-            adjustedSlotEndMinutes,
-            duration,
-            daySpan
-          };
-        }).sort((a, b) => a.slotStartMinutes - b.slotStartMinutes);
+            departmentId: requirement.departmentId,
+            day: day
+          });
+        });
+      }
 
-        const currentDate = start.add(i, 'day').toDate();
-        const assignedTimeSlots = new Map();
+      if (dayRequirements.length === 0) {
+        console.log(`No shift requirements for ${day}`);
+        continue;
+      }
 
-        for (const slot of slots) {
-          console.log(`Processing slot for ${day}:`, slot);
+      // Sort by start time
+      dayRequirements.sort((a, b) => timeToMinutes(a.startTime) - timeToMinutes(b.startTime));
 
-          const slotStartMinutes = slot.slotStartMinutes;
-          const adjustedSlotEndMinutes = slot.adjustedSlotEndMinutes;
-          const slotStartDayIdx = slot.slotStartDayIdx;
-          const slotEndDayIdx = slot.slotEndDayIdx;
-          const slotDuration = slot.duration;
+      console.log(`Found ${dayRequirements.length} shift requirements for ${day}:`);
+      dayRequirements.forEach((req, i) => {
+        console.log(`  ${i + 1}. ${req.startTime}-${req.endTime} (${req.minEmployees} employees)`);
+      });
 
-          // Check if this slot is fully covered by existing assignments
-          let remainingMinEmployees = slot.minEmployees;
-          const coveringAssignments = [];
-          for (const [employeeId, timeSlots] of assignedTimeSlots) {
-            for (const assigned of timeSlots) {
-              if (
-                slotStartMinutes >= assigned.startMinutes &&
-                adjustedSlotEndMinutes <= assigned.adjustedEndMinutes &&
-                assigned.slotStartDayIdx === slotStartDayIdx &&
-                assigned.slotEndDayIdx === slotEndDayIdx
-              ) {
-                coveringAssignments.push({ employeeId, assigned });
-                remainingMinEmployees--;
-                if (remainingMinEmployees <= 0) break;
-              }
-            }
-            if (remainingMinEmployees <= 0) break;
-          }
+      // Process each shift requirement
+      for (const shiftReq of dayRequirements) {
+        console.log(`\nProcessing shift: ${shiftReq.startTime}-${shiftReq.endTime}`);
 
-          if (remainingMinEmployees <= 0) {
-            console.log(`Slot ${slot.startTime}-${slot.endTime} on ${day} is already fully covered by existing assignments`);
+        const reqStartMinutes = timeToMinutes(shiftReq.startTime);
+        let reqEndMinutes = timeToMinutes(shiftReq.endTime);
+        
+        // Handle overnight shifts
+        if (reqEndMinutes <= reqStartMinutes) {
+          reqEndMinutes += 24 * 60;
+        }
+
+        const shiftDurationMinutes = reqEndMinutes - reqStartMinutes;
+        const shiftDurationHours = shiftDurationMinutes / 60;
+
+        console.log(`Shift details: ${shiftDurationHours} hours (${reqStartMinutes}-${reqEndMinutes} minutes)`);
+
+        // Find available employees
+        const candidates = [];
+
+        for (const avail of validAvailabilities) {
+          const employeeId = avail.employeeId._id.toString();
+          
+          // Check if employee already has THIS EXACT shift time
+          const shiftKey = `${shiftReq.startTime}-${shiftReq.endTime}`;
+          if (employeeShiftTimes[employeeId]?.includes(shiftKey)) {
+            console.log(`Skipping ${avail.employeeId.name}: already has this exact shift time`);
             continue;
           }
 
-          const availableEmployees = [];
-          for (const avail of availabilities) {
-            const employeeIdStr = avail.employeeId?._id?.toString();
-            if (!employeeIdStr) {
-              console.log(`Skipping availability ${avail._id}: No employeeId`);
-              continue;
+          const dayAvailability = avail.days[day];
+          if (!dayAvailability || !dayAvailability.available) {
+            console.log(`Skipping ${avail.employeeId.name}: not available on ${day}`);
+            continue;
+          }
+
+          console.log(`Checking ${avail.employeeId.name} for ${day} ${shiftReq.startTime}-${shiftReq.endTime}`);
+
+          // Check each availability slot
+          for (const availSlot of dayAvailability.slots || []) {
+            const availStartMinutes = timeToMinutes(availSlot.startTime);
+            let availEndMinutes = timeToMinutes(availSlot.endTime);
+            
+            // Handle overnight availability
+            if (availEndMinutes <= availStartMinutes) {
+              availEndMinutes += 24 * 60;
             }
 
-            // Check if the employee has already been assigned a shift on this day
-            if (employeesAssignedPerDay[day].has(employeeIdStr)) {
-              console.log(`Employee ${avail.employeeId.email} already assigned a shift on ${day}. Skipping for this slot.`);
-              continue;
-            }
+            console.log(`  Available: ${availSlot.startTime}-${availSlot.endTime} (${availStartMinutes}-${availEndMinutes})`);
+            console.log(`  Required: ${shiftReq.startTime}-${shiftReq.endTime} (${reqStartMinutes}-${reqEndMinutes})`);
 
-            const dayAvailability = avail.days[day];
-            if (!dayAvailability || !dayAvailability.available) {
-              console.log(`Employee ${avail.employeeId.email} is not available on ${day}. Raw days data:`, JSON.stringify(avail.days, null, 2));
-              continue;
-            }
+            // Calculate overlap
+            const overlapStart = Math.max(reqStartMinutes, availStartMinutes);
+            const overlapEnd = Math.min(reqEndMinutes, availEndMinutes);
 
-            const matchingSlot = dayAvailability.slots.find((s) => {
-              if (!s.startTime || !s.endTime || !/^\d{2}:\d{2}$/.test(s.startTime) || !/^\d{2}:\d{2}$/.test(s.endTime)) {
-                console.log(`Invalid slot format for employee ${avail.employeeId.email} on ${day}:`, s);
-                return false;
-              }
+            if (overlapStart < overlapEnd) {
+              const overlapMinutes = overlapEnd - overlapStart;
+              const overlapHours = overlapMinutes / 60;
+              const coveragePercentage = (overlapMinutes / shiftDurationMinutes) * 100;
 
-              // Normalize shiftType for availability
-              let normalizedAvailableShiftType = s.shiftType ? s.shiftType.toLowerCase() : null;
-              const startHour = parseInt(s.startTime.split(':')[0]);
-              const inferredShiftType = startHour >= 18 || startHour < 6 ? 'night' : 'day';
-              if (!normalizedAvailableShiftType) {
-                normalizedAvailableShiftType = inferredShiftType;
-                console.log(`Inferred shiftType for availability slot ${s.startTime}-${s.endTime} on ${day} for employee ${avail.employeeId.email}: ${normalizedAvailableShiftType}`);
-              } else if (normalizedAvailableShiftType !== inferredShiftType) {
-                console.warn(`Shift type mismatch with time range for availability slot ${s.startTime}-${s.endTime} on ${day} for employee ${avail.employeeId.email}:`, {
-                  databaseShiftType: s.shiftType,
-                  inferredShiftType,
+              console.log(`    Overlap: ${overlapMinutes} minutes (${coveragePercentage.toFixed(1)}% coverage)`);
+
+              // Accept meaningful overlap (at least 30 minutes)
+              if (overlapMinutes >= 30) {
+                const currentHours = employeeHours[employeeId] || 0;
+                
+                candidates.push({
+                  employeeId,
+                  employee: avail.employeeId,
+                  overlapStart,
+                  overlapEnd,
+                  overlapHours,
+                  coveragePercentage,
+                  currentHours,
+                  actualStartTime: minutesToTime(overlapStart),
+                  actualEndTime: minutesToTime(overlapEnd % (24 * 60)),
+                  isExactMatch: coveragePercentage >= 95,
+                  shiftKey
                 });
-                normalizedAvailableShiftType = inferredShiftType; // Prioritize inferred shift type based on time
-              }
 
-              // Match shiftType
-              if (normalizedAvailableShiftType !== slot.shiftType) {
-                console.log(`Shift type mismatch for ${avail.employeeId.email} on ${day}:`, {
-                  requiredShiftType: slot.shiftType,
-                  availableShiftType: normalizedAvailableShiftType,
-                });
-                return false;
-              }
-
-              const sStartDayIdx = daysOfWeekIndices[s.startDay.toLowerCase()];
-              const sEndDayIdx = daysOfWeekIndices[s.endDay.toLowerCase()];
-              const sStartMinutes = parseInt(s.startTime.split(':')[0]) * 60 + parseInt(s.startTime.split(':')[1]);
-              let sEndMinutes = parseInt(s.endTime.split(':')[0]) * 60 + parseInt(s.endTime.split(':')[1]);
-              let adjustedSEndMinutes = sEndMinutes;
-              let sDaySpan = 0;
-
-              if (sEndDayIdx < sStartDayIdx) {
-                sDaySpan = 7 - sStartDayIdx + sEndDayIdx;
-                adjustedSEndMinutes += sDaySpan * 24 * 60;
-              } else if (sEndDayIdx === sStartDayIdx && sEndMinutes <= sStartMinutes) {
-                sDaySpan = 1;
-                adjustedSEndMinutes += 24 * 60;
+                console.log(`    ✓ Added candidate: ${avail.employeeId.name} ${minutesToTime(overlapStart)}-${minutesToTime(overlapEnd % (24 * 60))} (${overlapHours.toFixed(2)}h, ${coveragePercentage.toFixed(1)}%)`);
               } else {
-                sDaySpan = sEndDayIdx - sStartDayIdx;
-                if (sEndMinutes <= sStartMinutes) {
-                  adjustedSEndMinutes += 24 * 60;
-                  sDaySpan += 1;
-                }
+                console.log(`    ✗ Overlap too small: ${overlapMinutes} minutes`);
               }
-
-              // Check if the availability slot covers the required slot
-              const slotMatchesStartDay = sStartDayIdx === slotStartDayIdx;
-              if (!slotMatchesStartDay) {
-                console.log(`Start day mismatch for ${avail.employeeId.email} on ${day}:`, {
-                  requiredStartDay: slot.startDay,
-                  availableStartDay: s.startDay,
-                });
-                return false;
-              }
-
-              // Simplified overlap check: ensure the availability covers the required slot
-              const coversStart = sStartMinutes <= slotStartMinutes;
-              let coversEnd = false;
-              if (sEndDayIdx > sStartDayIdx || (sEndDayIdx === sStartDayIdx && adjustedSEndMinutes >= adjustedSlotEndMinutes)) {
-                // Availability either spans days or ends late enough on the same day
-                coversEnd = true;
-              }
-
-              const overlaps = coversStart && coversEnd;
-
-              console.log(`Checking overlap for ${avail.employeeId.email} on ${day}:`, {
-                required: `${slot.startTime}-${slot.endTime} (Day ${slotStartDayIdx} to ${slotEndDayIdx}, Type: ${slot.shiftType})`,
-                available: `${s.startTime}-${s.endTime} (Day ${sStartDayIdx} to ${sEndDayIdx}, Type: ${normalizedAvailableShiftType})`,
-                slotStartMinutes,
-                adjustedSlotEndMinutes,
-                sStartMinutes,
-                adjustedSEndMinutes,
-                slotMatchesStartDay,
-                coversStart,
-                coversEnd,
-                overlaps,
-                rawSlot: s,
-              });
-              return overlaps;
-            });
-
-            if (!matchingSlot) {
-              console.log(`No matching slot found for employee ${avail.employeeId.email} on ${day}. Available slots:`, JSON.stringify(dayAvailability.slots, null, 2));
-              continue;
-            }
-
-            const sStartMinutes = parseInt(matchingSlot.startTime.split(':')[0]) * 60 + parseInt(matchingSlot.startTime.split(':')[1]);
-            let sEndMinutes = parseInt(matchingSlot.endTime.split(':')[0]) * 60 + parseInt(matchingSlot.endTime.split(':')[1]);
-            let adjustedSEndMinutes = sEndMinutes;
-            let sStartDayIdx = daysOfWeekIndices[matchingSlot.startDay.toLowerCase()];
-            let sEndDayIdx = daysOfWeekIndices[matchingSlot.endDay.toLowerCase()];
-            let sDaySpan = 0;
-
-            if (sEndDayIdx < sStartDayIdx) {
-              sDaySpan = 7 - sStartDayIdx + sEndDayIdx;
-              adjustedSEndMinutes += sDaySpan * 24 * 60;
-            } else if (sEndDayIdx === sStartDayIdx && sEndMinutes <= sStartMinutes) {
-              sDaySpan = 1;
-              adjustedSEndMinutes += 24 * 60;
             } else {
-              sDaySpan = sEndDayIdx - sStartDayIdx;
-              if (sEndMinutes <= sStartMinutes) {
-                adjustedSEndMinutes += 24 * 60;
-                sDaySpan += 1;
-              }
+              console.log(`    ✗ No overlap`);
             }
-
-            // Calculate the actual overlapping time for the shift
-            const actualStartMinutes = Math.max(sStartMinutes, slotStartMinutes);
-            const actualEndMinutes = adjustedSlotEndMinutes; // Since the overlap check passed, use the required slot's end time
-
-            if (actualEndMinutes <= actualStartMinutes) {
-              actualEndMinutes += 24 * 60;
-            }
-
-            const actualDurationMinutes = actualEndMinutes - actualStartMinutes;
-            const actualDurationHours = actualDurationMinutes / 60;
-
-            const requiredDurationMinutes = adjustedSlotEndMinutes - slotStartMinutes;
-            const requiredDurationHours = requiredDurationMinutes / 60;
-            const coveragePercentage = (actualDurationHours / requiredDurationHours) * 100;
-
-            console.log(`Coverage calculation for ${avail.employeeId.email} on ${day}:`, {
-              actualStartMinutes,
-              actualEndMinutes,
-              actualDurationHours,
-              requiredDurationHours,
-              coveragePercentage,
-            });
-
-            if (coveragePercentage < 100) {
-              console.log(`Employee ${avail.employeeId.email} does not fully cover the shift (Coverage: ${coveragePercentage.toFixed(2)}%)`);
-              continue;
-            }
-
-            const actualStart = `${Math.floor(actualStartMinutes / 60).toString().padStart(2, '0')}:${(actualStartMinutes % 60).toString().padStart(2, '0')}`;
-            const actualEnd = `${Math.floor((actualEndMinutes % (24 * 60)) / 60).toString().padStart(2, '0')}:${(actualEndMinutes % 60).toString().padStart(2, '0')}`;
-
-            const currentHours = employeeHours[employeeIdStr] || 0;
-            const shiftHours = actualDurationHours;
-            console.log(`Employee ${avail.employeeId.email} current hours: ${currentHours}, adding shift of ${shiftHours} hours on ${day}`);
-
-            availableEmployees.push({
-              ...avail,
-              actualStart,
-              actualEnd,
-              preference: matchingSlot.preference || 0,
-              currentHours,
-              coveragePercentage,
-              shiftHours,
-              slotStartDayIdx: sStartDayIdx,
-              slotEndDayIdx: sEndDayIdx,
-              adjustedSEndMinutes
-            });
           }
+        }
 
-          availableEmployees.sort((a, b) => {
-            const coverageDiff = b.coveragePercentage - a.coveragePercentage;
-            if (coverageDiff !== 0) return coverageDiff;
-            const hoursDiff = a.currentHours - b.currentHours;
-            if (hoursDiff !== 0) return hoursDiff;
-            return b.preference - a.preference;
-          });
+        console.log(`Found ${candidates.length} candidates for ${day} ${shiftReq.startTime}-${shiftReq.endTime}`);
 
-          console.log(`Available employees for ${day} slot ${slot.startTime}-${slot.endTime}:`, JSON.stringify(availableEmployees.map((emp) => ({
-            email: emp.employeeId?.email,
-            actualStart: emp.actualStart,
-            actualEnd: emp.actualEnd,
-            preference: emp.preference,
-            currentHours: emp.currentHours,
-            coveragePercentage: emp.coveragePercentage,
-            shiftHours: emp.shiftHours,
-            slotStartDayIdx: emp.slotStartDayIdx,
-            slotEndDayIdx: emp.slotEndDayIdx,
-          }), null, 2)));
+        if (candidates.length === 0) {
+          console.warn(`No candidates available for ${day} ${shiftReq.startTime}-${shiftReq.endTime}`);
+          continue;
+        }
 
-          if (availableEmployees.length < remainingMinEmployees) {
-            return res.status(400).json({
-              message: 'Not enough employees available to fulfill shift requirements. Please ensure employees have submitted their availability or adjust the shift requirements.',
-              conflicts: [{
-                departmentName,
-                day,
-                startTime: slot.startTime,
-                endTime: slot.endTime,
-                required: slot.minEmployees,
-                assigned: slot.minEmployees - remainingMinEmployees,
-                availableEmployees: availableEmployees.map((emp) => ({
-                  name: emp.employeeId ? emp.employeeId.name : 'Unknown',
-                  preference: emp.preference,
-                  currentHours: emp.currentHours,
-                  availableTime: `${emp.actualStart}-${emp.actualEnd}`,
-                })),
-              }],
-            });
-          }
+        // Sort candidates: exact matches first, then by coverage, then by fairness
+        candidates.sort((a, b) => {
+          // Exact matches get priority
+          if (a.isExactMatch && !b.isExactMatch) return -1;
+          if (!a.isExactMatch && b.isExactMatch) return 1;
+          
+          // Then by coverage percentage
+          const coverageDiff = b.coveragePercentage - a.coveragePercentage;
+          if (Math.abs(coverageDiff) > 5) return coverageDiff;
+          
+          // Then by fairness (fewer current hours is better)
+          const hoursDiff = a.currentHours - b.currentHours;
+          if (Math.abs(hoursDiff) > 1) return hoursDiff;
+          
+          return 0;
+        });
 
-          for (let j = 0; j < remainingMinEmployees; j++) {
-            const employee = availableEmployees[j];
-            if (!employee || !employee.employeeId || !employee.employeeId._id) {
-              console.log('Invalid employee data at index', j, ':', employee);
-              throw new Error('Invalid employee data: employeeId is missing or invalid.');
-            }
+        console.log(`Top candidates:`);
+        candidates.slice(0, 3).forEach((candidate, i) => {
+          console.log(`  ${i + 1}. ${candidate.employee.name}: ${candidate.actualStartTime}-${candidate.actualEndTime} (${candidate.coveragePercentage.toFixed(1)}%, ${candidate.currentHours}h current)`);
+        });
 
-            const employeeIdStr = employee.employeeId._id.toString();
+        // Assign employees to this shift
+        const assignmentsNeeded = Math.min(shiftReq.minEmployees, candidates.length);
+        
+        for (let i = 0; i < assignmentsNeeded; i++) {
+          const assignment = candidates[i];
+          const employeeIdStr = assignment.employeeId;
+          
+          try {
             const shift = new ShiftSchedule({
+              employeeId: assignment.employeeId,
               companyId,
-              departmentId: requirement.departmentId,
-              employeeId: employee.employeeId._id,
+              departmentId: shiftReq.departmentId,
               weekStartDate: start.toDate(),
               day,
-              startTime: employee.actualStart,
-              endTime: employee.actualEnd,
-              durationHours: employee.shiftHours,
+              startTime: assignment.actualStartTime,
+              endTime: assignment.actualEndTime,
+              durationHours: assignment.overlapHours
             });
 
-            console.log('Saving shift for employee:', employee.employeeId?.email, shift);
             await shift.save();
             shifts.push(shift);
 
-            // Mark the employee as assigned for this day
-            employeesAssignedPerDay[day].add(employeeIdStr);
-
-            if (!assignedTimeSlots.has(employeeIdStr)) {
-              assignedTimeSlots.set(employeeIdStr, []);
+            // Update tracking
+            employeeHours[employeeIdStr] = (employeeHours[employeeIdStr] || 0) + assignment.overlapHours;
+            
+            // Track this specific shift time for this employee
+            if (!employeeShiftTimes[employeeIdStr]) {
+              employeeShiftTimes[employeeIdStr] = [];
             }
-            assignedTimeSlots.get(employeeIdStr).push({
-              startMinutes: parseInt(employee.actualStart.split(':')[0]) * 60 + parseInt(employee.actualStart.split(':')[1]),
-              adjustedEndMinutes: employee.adjustedSEndMinutes,
-              slotStartDayIdx: employee.slotStartDayIdx,
-              slotEndDayIdx: employee.slotEndDayIdx,
-            });
-
-            employeeHours[employeeIdStr] = (employeeHours[employeeIdStr] || 0) + employee.shiftHours;
-
-            if (!employeeShifts[employeeIdStr]) {
-              employeeShifts[employeeIdStr] = {
-                employee: employee.employeeId,
-                shifts: [],
-              };
-            }
-            employeeShifts[employeeIdStr].shifts.push(shift);
+            employeeShiftTimes[employeeIdStr].push(assignment.shiftKey);
 
             if (!employeeAssignments[employeeIdStr]) {
-              employeeAssignments[employeeIdStr] = [];
+              employeeAssignments[employeeIdStr] = {
+                employee: assignment.employee,
+                shifts: []
+              };
             }
-            employeeAssignments[employeeIdStr].push({ day, shift });
+            employeeAssignments[employeeIdStr].shifts.push(shift);
 
-            fairnessMetricsByDept[deptId].totalHours += employee.shiftHours;
-            fairnessMetricsByDept[deptId].shiftsAssigned += 1;
-            fairnessMetricsByDept[deptId].employeesAssigned.add(employeeIdStr);
+            console.log(`✓ ASSIGNED: ${assignment.employee.name} to ${assignment.actualStartTime}-${assignment.actualEndTime} (${assignment.overlapHours.toFixed(2)}h)`);
+            console.log(`  Total hours for ${assignment.employee.name}: ${employeeHours[employeeIdStr].toFixed(2)}h`);
+          } catch (error) {
+            console.error(`Failed to save shift for ${assignment.employee.name}:`, error);
           }
         }
+
+        console.log(`Completed shift assignment: ${assignmentsNeeded} employees assigned`);
+      }
+
+      console.log(`\nCompleted ${day}. Employee hours so far:`);
+      Object.entries(employeeHours).forEach(([empId, hours]) => {
+        const empName = employeeAssignments[empId]?.employee?.name || 'Unknown';
+        console.log(`  ${empName}: ${hours.toFixed(2)}h`);
+      });
+    }
+
+    console.log(`\n=== Final Summary ===`);
+    console.log(`Generated ${shifts.length} total shifts`);
+
+    if (shifts.length === 0) {
+      return res.status(400).json({ message: 'Unable to generate any shifts.' });
+    }
+
+    // Send email notifications
+    for (const employeeId in employeeAssignments) {
+      const { employee, shifts: employeeShifts } = employeeAssignments[employeeId];
+      try {
+        await sendScheduleEmail(employee, employeeShifts, start);
+        console.log(`Email sent to ${employee.email}`);
+      } catch (emailError) {
+        console.error(`Email failed for ${employee.email}:`, emailError.message);
       }
     }
 
-    for (const deptId in fairnessMetricsByDept) {
-      fairnessMetricsByDept[deptId].employeesAssigned = fairnessMetricsByDept[deptId].employeesAssigned.size;
-    }
+    // Calculate metrics
+    const fairnessMetrics = {
+      totalHours: Object.values(employeeHours).reduce((sum, hours) => sum + hours, 0),
+      shiftsAssigned: shifts.length,
+      employeesAssigned: Object.keys(employeeAssignments).length,
+      averageHoursPerEmployee: Object.keys(employeeHours).length > 0 
+        ? Object.values(employeeHours).reduce((sum, hours) => sum + hours, 0) / Object.keys(employeeHours).length 
+        : 0,
+      hourDistribution: employeeHours
+    };
 
-    if (Object.keys(employeeShifts).length > 0) {
-      console.log('Sending email notifications to employees:', Object.keys(employeeShifts));
-      for (const employeeId in employeeShifts) {
-        const { employee, shifts } = employeeShifts[employeeId];
-        try {
-          await sendScheduleEmail(employee, shifts, start);
-          console.log(`Successfully sent schedule email to ${employee.email}`);
-        } catch (emailError) {
-          console.error(`Failed to send schedule email to ${employee.email}:`, emailError.message);
-        }
+    console.log('Final employee hours:', fairnessMetrics.hourDistribution);
+
+    return res.status(200).json({
+      shifts,
+      fairnessMetricsByDept: { [departmentId]: fairnessMetrics },
+      summary: {
+        totalShifts: shifts.length,
+        employeesScheduled: Object.keys(employeeAssignments).length,
+        averageHours: fairnessMetrics.averageHoursPerEmployee.toFixed(2)
       }
-    } else {
-      console.log('No shifts assigned, skipping email notifications');
-    }
+    });
 
-    console.log('Schedule generated successfully:', { shifts, fairnessMetricsByDept });
-    return res.status(200).json({ shifts, fairnessMetricsByDept });
   } catch (error) {
-    console.error('Error generating schedule:', error.stack);
-    return res.status(500).json({ message: 'Failed to generate schedule.', error: error.message, stack: error.stack });
+    console.error('Auto-schedule error:', error);
+    return res.status(500).json({
+      message: 'Failed to generate schedule.',
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
+
 // POST /shift-schedule: Add a new shift with overlap validation
-router.post('/shift-schedule/:companyId', verifyUser, authorizeRoles(['Manager']), async (req, res) => {
+router.post('/schedule/:companyId', verifyUser, authorizeRoles(['Manager']), async (req, res) => {
   try {
-    const { employeeId, companyId, weekStartDate, day, startTime, endTime } = req.body;
-    console.log('Received POST /api/availability/shift-schedule payload:', JSON.stringify(req.body, null, 2));
+    const { companyId } = req.params;
+    const { 
+      employeeId, 
+      day, 
+      startTime, 
+      endTime, 
+      weekStartDate, 
+      departmentId, 
+      note,
+      durationHours // Accept durationHours from frontend
+    } = req.body;
 
-    if (!employeeId || !mongoose.Types.ObjectId.isValid(employeeId)) {
-      return res.status(400).json({ message: 'Invalid employeeId.' });
-    }
-    if (!companyId || !mongoose.Types.ObjectId.isValid(companyId)) {
-      return res.status(400).json({ message: 'Invalid companyId.' });
-    }
-    if (!weekStartDate || !dayjs.utc(weekStartDate, 'YYYY-MM-DD').isValid()) {
-      return res.status(400).json({ message: 'Invalid weekStartDate.' });
-    }
-    if (!['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'].includes(day)) {
-      return res.status(400).json({ message: 'Invalid day.' });
-    }
-    if (!startTime || !endTime || !/^\d{2}:\d{2}$/.test(startTime) || !/^\d{2}:\d{2}$/.test(endTime)) {
-      return res.status(400).json({ message: 'Invalid time format.' });
-    }
+    console.log('Creating manual shift for company:', companyId);
+    console.log('Request body:', req.body);
 
-    const start = dayjs(`2025-01-01 ${startTime}`, 'YYYY-MM-DD HH:mm').utc();
-    const end = dayjs(`2025-01-01 ${endTime}`, 'YYYY-MM-DD HH:mm').utc();
-    if (start.isSame(end) || start.isAfter(end)) {
-      return res.status(400).json({ message: 'Start time must be before end time.' });
-    }
-
-    // Check for overlapping shifts
-    const weekStart = dayjs.utc(weekStartDate, 'YYYY-MM-DD').startOf('day').toDate();
-    const hasOverlap = await checkForOverlappingShifts(employeeId, weekStart, day, startTime, endTime);
-    if (hasOverlap) {
-      return res.status(400).json({ message: `Employee already has a shift on ${day} that overlaps with ${startTime}-${endTime}.` });
+    // Validate required fields
+    if (!employeeId || !day || !startTime || !endTime || !weekStartDate || !departmentId) {
+      return res.status(400).json({ 
+        message: 'Missing required fields for manual shift creation.',
+        missingFields: {
+          employeeId: !employeeId,
+          day: !day,
+          startTime: !startTime,
+          endTime: !endTime,
+          weekStartDate: !weekStartDate,
+          departmentId: !departmentId
+        }
+      });
     }
 
-    const shift = new ShiftSchedule({
+    // Validate ObjectIds
+    if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+      return res.status(400).json({ message: 'Invalid employeeId format.' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(companyId)) {
+      return res.status(400).json({ message: 'Invalid companyId format.' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(departmentId)) {
+      return res.status(400).json({ message: 'Invalid departmentId format.' });
+    }
+
+    // Calculate duration if not provided
+    let calculatedDurationHours = durationHours;
+    if (!calculatedDurationHours) {
+      const [startHours, startMinutes] = startTime.split(':').map(Number);
+      const [endHours, endMinutes] = endTime.split(':').map(Number);
+      
+      const startTotalMinutes = startHours * 60 + startMinutes;
+      let endTotalMinutes = endHours * 60 + endMinutes;
+      
+      // Handle overnight shifts
+      if (endTotalMinutes <= startTotalMinutes) {
+        endTotalMinutes += 24 * 60;
+      }
+      
+      const durationMinutes = endTotalMinutes - startTotalMinutes;
+      calculatedDurationHours = durationMinutes / 60;
+    }
+
+    // Validate duration
+    if (!calculatedDurationHours || calculatedDurationHours <= 0) {
+      return res.status(400).json({ message: 'Invalid shift duration. Duration must be greater than 0.' });
+    }
+
+    // Parse weekStartDate
+    const weekStartDateObj = new Date(weekStartDate);
+    if (isNaN(weekStartDateObj.getTime())) {
+      return res.status(400).json({ message: 'Invalid weekStartDate format.' });
+    }
+
+    // Check if employee already has a shift at this time
+    const existingShift = await ShiftSchedule.findOne({
       employeeId,
-      companyId,
-      weekStartDate: weekStart,
+      day,
+      weekStartDate: weekStartDateObj,
+      $or: [
+        {
+          $and: [
+            { startTime: { $lt: endTime } },
+            { endTime: { $gt: startTime } }
+          ]
+        }
+      ]
+    });
+
+    if (existingShift) {
+      return res.status(409).json({ 
+        message: 'No available space for this shift. Employee already has a conflicting shift at this time.',
+        conflict: {
+          existingShift: {
+            day: existingShift.day,
+            startTime: existingShift.startTime,
+            endTime: existingShift.endTime
+          }
+        }
+      });
+    }
+
+    // Verify employee exists and belongs to the company
+    const employee = await User.findById(employeeId);
+    if (!employee) {
+      return res.status(404).json({ message: 'Employee not found.' });
+    }
+    if (employee.companyId.toString() !== companyId) {
+      return res.status(400).json({ message: 'Employee does not belong to this company.' });
+    }
+
+    // Verify department exists and belongs to the company
+    const department = await Department.findOne({ _id: departmentId, companyId });
+    if (!department) {
+      return res.status(404).json({ message: 'Department not found or does not belong to this company.' });
+    }
+
+    // Create the manual shift with all required fields
+    const newShift = new ShiftSchedule({
+      employeeId,
+      companyId, // Include companyId as required by schema
+      departmentId,
+      weekStartDate: weekStartDateObj,
       day,
       startTime,
       endTime,
+      durationHours: Number(calculatedDurationHours.toFixed(2)) // Include durationHours as required by schema
     });
 
-    await shift.save();
-    console.log('Shift created successfully:', shift._id);
-    return res.status(201).json({ message: 'Shift created successfully.', data: shift });
+    console.log('Creating shift with data:', {
+      employeeId,
+      companyId,
+      departmentId,
+      weekStartDate: weekStartDateObj,
+      day,
+      startTime,
+      endTime,
+      durationHours: calculatedDurationHours
+    });
+
+    await newShift.save();
+    
+    // Populate the employee data for the response
+    await newShift.populate('employeeId', 'name email role');
+
+    console.log('Manual shift created successfully:', newShift._id);
+    
+    res.status(201).json({
+      message: 'Manual shift created successfully',
+      shift: newShift
+    });
+
   } catch (error) {
-    console.error('Error creating shift:', error.stack);
-    return res.status(500).json({ message: 'Failed to create shift.', error: error.message });
+    console.error('Error creating manual shift:', error);
+    
+    // Handle validation errors specifically
+    if (error.name === 'ValidationError') {
+      const validationErrors = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({ 
+        message: 'Validation failed', 
+        error: error.message,
+        validationErrors
+      });
+    }
+    
+    // Handle duplicate key errors
+    if (error.code === 11000) {
+      return res.status(409).json({ 
+        message: 'Duplicate shift detected', 
+        error: 'A shift with these details already exists'
+      });
+    }
+    
+    res.status(500).json({ 
+      message: 'Failed to create manual shift', 
+      error: error.message 
+    });
   }
 });
 
@@ -2830,5 +2984,6 @@ router.get('/shift-swap/available/:employeeId', verifyUser, authorizeRoles(), as
     res.status(500).json({ message: 'Server error while fetching available shifts.', error: error.message });
   }
 });
+
 
 export default router;
