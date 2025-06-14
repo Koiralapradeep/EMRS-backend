@@ -4,7 +4,6 @@ import Leave from "../models/Leave.js";
 import Employee from "../models/Employee.js";
 import { verifyUser } from "../middleware/authMiddleware.js";
 import Notification from "../models/Notifications.js";
-import { sendNotification } from "../index.js";
 import User from "../models/User.js";
 
 const router = express.Router();
