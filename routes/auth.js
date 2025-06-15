@@ -18,37 +18,6 @@ if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
   console.error("Critical: EMAIL_USER or EMAIL_PASS not set in environment variables");
 }
 
-// Configure Nodemailer for Gmail
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
-
-// Test Email Sending
-router.get("/test-email", async (req, res) => {
-  try {
-    console.log("Attempting to send test email to itsduominds@gmail.com...");
-    await transporter.sendMail({
-      to: "itsduominds@gmail.com",
-      from: process.env.EMAIL_USER,
-      subject: "Test Email",
-      html: "<p>This is a test email from your application.</p>",
-    });
-    console.log("Test email sent successfully");
-    res.json({ success: true, message: "Test email sent" });
-  } catch (err) {
-    console.error("Test Email Error:", {
-      message: err.message,
-      code: err.code,
-      stack: err.stack,
-    });
-    res.status(500).json({ success: false, error: "Failed to send test email" });
-  }
-});
-
 // Normal Login (Email & Password)
 router.post("/login", (req, res) => {
   console.log("DEBUG - Incoming request: POST /api/auth/login");
@@ -220,6 +189,13 @@ router.post("/forgot-password", async (req, res) => {
     console.log("Step 6: Preparing email with reset URL...");
     const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
     console.log("Step 7: Sending email to:", user.email, "with reset URL:", resetUrl);
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
     await transporter.sendMail({
       to: user.email,
       from: process.env.EMAIL_USER,
