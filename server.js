@@ -18,17 +18,15 @@ import notifications from "./routes/notifications.js";
 import availability from "./routes/availability.js";
 import passport from "passport";
 import holiday from "./routes/holidays.js";
-import User from './models/User.js';
 import shiftswap from "./routes/shiftswap.js";
 import admin from "./routes/admin.js";
 import messages from './routes/message.js';
-
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-// Load environment variables first
+// Load environment variables
 dotenv.config({ path: './.env' });
 console.log('DEBUG - Loaded .env file');
 
@@ -100,7 +98,6 @@ app.use("/api/manager", manager);
 app.use("/api/notifications", notifications);
 app.use("/api/availability", availability);
 app.use("/api/holidays", holiday);
-app.use('/api/users', User);
 app.use('/api/shift-swap', shiftswap);
 app.use('/api/admin', admin);
 app.use('/api/messages', messages);
@@ -108,10 +105,34 @@ app.get("/", (req, res) => {
   res.send("Backend server is running!");
 });
 
-// Connect to MongoDB
-connectDB().catch((err) => {
-  console.error("Failed to connect to DB:", err.message);
+// Error handlers
+app.use((req, res, next) => {
+  const error = new Error('Not Found');
+  error.status = 404;
+  next(error);
 });
 
-// Export the app for Vercel
+app.use((err, req, res, next) => {
+  console.error('Error:', err.stack);
+  res.status(err.status || 500).json({
+    error: {
+      message: err.message || 'Internal Server Error',
+      status: err.status || 500
+    }
+  });
+});
+
+// Start server
+async function startServer() {
+  try {
+    await connectDB();
+    console.log('MongoDB connected successfully');
+  } catch (err) {
+    console.error('Failed to connect to DB:', err.message);
+  }
+}
+
+startServer();
+
+// Export for Vercel
 export default app;
