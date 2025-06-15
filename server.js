@@ -23,6 +23,11 @@ import shiftswap from "./routes/shiftswap.js";
 import admin from "./routes/admin.js";
 import messages from './routes/message.js';
 
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 // Load environment variables first
 dotenv.config({ path: './.env' });
 console.log('DEBUG - Loaded .env file');
